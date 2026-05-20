@@ -1,0 +1,17 @@
+{
+  "name": "kanjiden-mcp",
+  "version": "2.1.0",
+  "description": "KanjiDen MCP Server — Japanese study agent backend",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev":   "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@supabase/supabase-js":     "^2.49.0",
+    "dotenv":                    "^16.5.0",
+    "zod":                       "^3.25.36"
+  }
+}
