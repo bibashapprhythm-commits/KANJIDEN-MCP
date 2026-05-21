@@ -112,3 +112,13 @@ export async function getPendingSession() {
   if (error) return null
   return data
 }
+
+export async function getSession(sessionId) {
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('*')
+    .eq('id', sessionId)
+    .single()
+  if (error) throw new Error(`getSession failed: ${error.message}`)
+  return data
+}

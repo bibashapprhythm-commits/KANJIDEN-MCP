@@ -15,7 +15,7 @@ import { getConfig, getLearningContext }                                        
 import { createSourceText, updateSourceTextCounts, storeKanji, storeKotoba }   from "./modules/extractor.js";
 import { getDueToday }                                                          from "./modules/scheduler.js";
 import { processQuizAnswer }                                                    from "./modules/review.js";
-import { createSession }                                                        from "./modules/session.js";
+import { createSession, getPendingSession, getSession } from "./modules/session.js";
 import { getProgress, getWeakWords, getConfusionReport }                        from "./modules/analytics.js";
 
 // ── Gateway key ───────────────────────────────────────────────────────────────
@@ -68,6 +68,8 @@ const REST_TOOLS = {
   process_quiz_answer: (args) => processQuizAnswer(args),
   get_learning_context:(_)    => getLearningContext(),
   complete_session:    (args) => completeSession(args),
+  get_session:         (args) => getSession(args.session_id),
+get_pending_session: ()     => getPendingSession(),
 };
 
 // ── MCP Server (for Claude.ai) ────────────────────────────────────────────────
