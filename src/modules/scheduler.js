@@ -11,7 +11,7 @@ export const ALGORITHM_VERSION = "sm2_v1";
 export const PROGRESS_SELECT = `
   id, curriculum_item_id, mastery_level, interval, ease_factor, next_review,
   weak_score, review_count, perf_by_type, streak, first_seen,
-  curriculum_items!inner(item_type, value, reading_hiragana, romaji, core_meaning, jlpt_level, onyomi, kunyomi)
+  curriculum_items!inner(item_type, value, reading_hiragana, romaji, romaji_on, romaji_kun, core_meaning, jlpt_level, onyomi, kunyomi)
 `;
 
 export function mapProgress(p) {
@@ -24,6 +24,8 @@ export function mapProgress(p) {
     value:         ci.value,
     reading:       ci.reading_hiragana,
     romaji:        ci.romaji,
+    romaji_on:     ci.romaji_on,
+    romaji_kun:    ci.romaji_kun,
     meaning:       ci.core_meaning,
     jlpt_level:    ci.jlpt_level,
     onyomi:        ci.onyomi,
