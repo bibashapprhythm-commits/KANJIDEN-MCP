@@ -1,32 +1,32 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ANALYTICS MODULE
-// Responsibility: progress stats, weak words, confusion patterns.
-// All reads only — never writes learning state.
-// Source of truth for confusion = review_log (not cached fields).
+// Reads user_item_progress joined with curriculum_items.
+// getConfusionReport queries review_log directly (no confusion_patterns view).
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase, BIBS_USER_ID } from "../db.js";
 
 const TODAY = () => new Date().toISOString().split("T")[0];
 
+const PROGRESS_SELECT = `
+  id, curriculum_item_id, mastery_level, times_correct, times_wrong,
+  weak_score, next_review, perf_by_type, avg_response_ms, streak,
+  curriculum_items!inner(item_type, value, jlpt_level)
+`;
+
 // ── Full progress report ──────────────────────────────────────────────────────
 export async function getProgress() {
-  const { data: kanjiData,  error: ke  } = await supabase
-    .from("kanji")
-    .select("jlpt_level, mastery_level, times_correct, times_wrong, weak_score, next_review_date, perf_by_type, avg_response_ms")
+  const { data, error } = await supabase
+    .from("user_item_progress")
+    .select(PROGRESS_SELECT)
     .eq("user_id", BIBS_USER_ID);
-
-  const { data: kotobaData, error: koe } = await supabase
-    .from("kotoba")
-    .select("jlpt_level, mastery_level, times_correct, times_wrong, weak_score, next_review_date, perf_by_type, avg_response_ms")
-    .eq("user_id", BIBS_USER_ID);
-
-  if (ke)  throw new Error(`getProgress kanji failed: ${ke.message}`);
-  if (koe) throw new Error(`getProgress kotoba failed: ${koe.message}`);
+  if (error) throw new Error(`getProgress failed: ${error.message}`);
 
   const today = TODAY();
+  const all     = data ?? [];
+  const kanji   = all.filter(p => p.curriculum_items.item_type === "kanji");
+  const kotoba  = all.filter(p => p.curriculum_items.item_type === "kotoba");
 
   const summarize = (items) => {
-    // Aggregate perf_by_type across all items
     const typePerf = {};
     for (const item of items) {
       for (const [qtype, counts] of Object.entries(item.perf_by_type ?? {})) {
@@ -36,7 +36,6 @@ export async function getProgress() {
       }
     }
 
-    // Find weakest question type by accuracy
     let weakestType = null, weakestRatio = 1;
     for (const [qtype, counts] of Object.entries(typePerf)) {
       const total = counts.correct + counts.wrong;
@@ -47,41 +46,41 @@ export async function getProgress() {
     }
 
     return {
-      total:     items.length,
-      new:       items.filter(i => i.mastery_level === 0).length,
-      learning:  items.filter(i => i.mastery_level === 1).length,
-      familiar:  items.filter(i => i.mastery_level === 2).length,
-      good:      items.filter(i => i.mastery_level === 3).length,
-      strong:    items.filter(i => i.mastery_level === 4).length,
-      mastered:  items.filter(i => i.mastery_level === 5).length,
-      due_today: items.filter(i => i.next_review_date <= today).length,
+      total:    items.length,
+      new:      items.filter(i => i.mastery_level === 0).length,
+      learning: items.filter(i => i.mastery_level === 1).length,
+      familiar: items.filter(i => i.mastery_level === 2).length,
+      good:     items.filter(i => i.mastery_level === 3).length,
+      strong:   items.filter(i => i.mastery_level === 4).length,
+      mastered: items.filter(i => i.mastery_level === 5).length,
+      due_today: items.filter(i => i.next_review <= today).length,
       total_correct:          items.reduce((a,i) => a + (i.times_correct  ?? 0), 0),
       total_wrong:            items.reduce((a,i) => a + (i.times_wrong    ?? 0), 0),
       avg_response_ms:        Math.round(items.reduce((a,i) => a + (i.avg_response_ms ?? 0), 0) / Math.max(items.length, 1)),
       performance_by_type:    typePerf,
       weakest_question_type:  weakestType,
       weakest_accuracy:       weakestType ? Math.round(weakestRatio * 100) : null,
-      by_jlpt: ["N1","N2","N3","N4","N5","unknown"].map(level => ({
+      by_jlpt: ["N1","N2","N3","N4","N5"].map(level => ({
         level,
-        count:    items.filter(i => i.jlpt_level === level).length,
-        mastered: items.filter(i => i.jlpt_level === level && i.mastery_level === 5).length,
-        due:      items.filter(i => i.jlpt_level === level && i.next_review_date <= today).length,
+        count:    items.filter(i => i.curriculum_items.jlpt_level === level).length,
+        mastered: items.filter(i => i.curriculum_items.jlpt_level === level && i.mastery_level === 5).length,
+        due:      items.filter(i => i.curriculum_items.jlpt_level === level && i.next_review <= today).length,
       })).filter(j => j.count > 0),
     };
   };
 
-  const kanji   = summarize(kanjiData  ?? []);
-  const kotoba  = summarize(kotobaData ?? []);
-  const total   = kanji.total   + kotoba.total;
-  const mastered = kanji.mastered + kotoba.mastered;
+  const kanjiStats  = summarize(kanji);
+  const kotobaStats = summarize(kotoba);
+  const total    = kanjiStats.total + kotobaStats.total;
+  const mastered = kanjiStats.mastered + kotobaStats.mastered;
 
   return {
-    kanji,
-    kotoba,
+    kanji:   kanjiStats,
+    kotoba:  kotobaStats,
     overall: {
       total,
       mastered,
-      due_today:       kanji.due_today + kotoba.due_today,
+      due_today:       kanjiStats.due_today + kotobaStats.due_today,
       mastery_percent: total > 0 ? Math.round((mastered / total) * 100) : 0,
     },
   };
@@ -89,61 +88,91 @@ export async function getProgress() {
 
 // ── Weak words ────────────────────────────────────────────────────────────────
 export async function getWeakWords({ type = "both" } = {}) {
-  const fields = "id, meaning, jlpt_level, mastery_level, times_wrong, times_correct, seen_in_texts, streak, weak_score, interval, ease_factor, perf_by_type, confused_with, confusion_type, avg_response_ms, exam_important, daily_important, last_correct_date";
+  const FIELDS = `
+    id, curriculum_item_id, mastery_level, times_wrong, times_correct, streak,
+    weak_score, interval, ease_factor, perf_by_type, avg_response_ms, last_correct_date,
+    curriculum_items!inner(item_type, value, reading_hiragana, romaji, core_meaning, jlpt_level)
+  `;
 
-  let kanjiWeak = [], kotobaWeak = [];
+  const items = [];
 
   if (type === "kanji" || type === "both") {
     const { data, error } = await supabase
-      .from("kanji")
-      .select(`char, ${fields}`)
+      .from("user_item_progress")
+      .select(FIELDS)
       .eq("user_id", BIBS_USER_ID)
+      .eq("curriculum_items.item_type", "kanji")
       .lt("mastery_level", 3)
       .order("weak_score", { ascending: false })
       .limit(20);
-    if (error) throw new Error(`getWeakWords kanji failed: ${error.message}`);
-    kanjiWeak = (data ?? []).map(k => ({ ...k, item_type: "kanji", item: k.char }));
+    if (error) throw new Error(`getWeakWords kanji: ${error.message}`);
+    for (const p of data ?? []) {
+      items.push({ ...p, item_type: "kanji", item: p.curriculum_items.value,
+        meaning: p.curriculum_items.core_meaning, jlpt_level: p.curriculum_items.jlpt_level });
+    }
   }
 
   if (type === "kotoba" || type === "both") {
     const { data, error } = await supabase
-      .from("kotoba")
-      .select(`word, reading, romaji, ${fields}`)
+      .from("user_item_progress")
+      .select(FIELDS)
       .eq("user_id", BIBS_USER_ID)
+      .eq("curriculum_items.item_type", "kotoba")
       .lt("mastery_level", 3)
       .order("weak_score", { ascending: false })
       .limit(20);
-    if (error) throw new Error(`getWeakWords kotoba failed: ${error.message}`);
-    kotobaWeak = (data ?? []).map(k => ({ ...k, item_type: "kotoba", item: k.word }));
+    if (error) throw new Error(`getWeakWords kotoba: ${error.message}`);
+    for (const p of data ?? []) {
+      items.push({ ...p, item_type: "kotoba", item: p.curriculum_items.value,
+        word: p.curriculum_items.value, reading: p.curriculum_items.reading_hiragana,
+        romaji: p.curriculum_items.romaji, meaning: p.curriculum_items.core_meaning,
+        jlpt_level: p.curriculum_items.jlpt_level });
+    }
   }
 
-  const all = [...kanjiWeak, ...kotobaWeak].sort((a, b) => b.weak_score - a.weak_score);
-  return { total_weak: all.length, items: all };
+  items.sort((a, b) => b.weak_score - a.weak_score);
+  return { total_weak: items.length, items };
 }
 
 // ── Confusion report ──────────────────────────────────────────────────────────
-// Source of truth = review_log via confusion_patterns view
+// Derived from review_log — no confusion_patterns view in v3 schema
 export async function getConfusionReport() {
   const { data, error } = await supabase
-    .from("confusion_patterns")
-    .select("*")
+    .from("review_log")
+    .select("curriculum_item_id, item_type, question_type, correct, user_answer, confused_with_id")
     .eq("user_id", BIBS_USER_ID)
-    .order("times_confused", { ascending: false })
-    .limit(20);
+    .eq("correct", false)
+    .not("user_answer", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(500);
   if (error) throw new Error(`getConfusionReport failed: ${error.message}`);
 
-  // Aggregate by question type
+  const rows = data ?? [];
+
   const byType = {};
-  for (const row of data ?? []) {
-    byType[row.question_type] = (byType[row.question_type] ?? 0) + row.times_confused;
+  const pairMap = {};
+  for (const row of rows) {
+    byType[row.question_type] = (byType[row.question_type] ?? 0) + 1;
+    if (row.confused_with_id) {
+      const key = `${row.curriculum_item_id}|${row.confused_with_id}|${row.question_type}`;
+      pairMap[key] = (pairMap[key] ?? 0) + 1;
+    }
   }
 
   const weakestType = Object.entries(byType).sort((a,b) => b[1]-a[1])[0]?.[0] ?? null;
 
+  const topPairs = Object.entries(pairMap)
+    .sort((a,b) => b[1]-a[1])
+    .slice(0, 20)
+    .map(([key, count]) => {
+      const [item_id, confused_with_id, question_type] = key.split("|");
+      return { item_id, confused_with_id, question_type, times_confused: count };
+    });
+
   return {
-    total_confusion_events: (data ?? []).reduce((a,r) => a + Number(r.times_confused), 0),
-    weakest_question_type:  weakestType,
-    confusion_by_type:      byType,
-    top_confused_items:     data ?? [],
+    total_wrong_answers:   rows.length,
+    weakest_question_type: weakestType,
+    confusion_by_type:     byType,
+    top_confused_items:    topPairs,
   };
 }

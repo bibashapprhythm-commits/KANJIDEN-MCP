@@ -1,23 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // CONTEXT MODULE
-// Responsibility: return summarized learning state for Claude.
-// Returns ONLY what Claude needs — not the entire DB.
-// Prevents context window bloat on long conversations.
+// Returns summarized learning state for Claude.
+// Reads user_item_progress joined with curriculum_items.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase, BIBS_USER_ID } from "../db.js";
 
 export async function getLearningContext() {
   const today = new Date().toISOString().split("T")[0];
 
-  // Fetch minimal fields only
-  const { data: kanjiData } = await supabase
-    .from("kanji")
-    .select("mastery_level, next_review_date, weak_score, jlpt_level, perf_by_type, char")
-    .eq("user_id", BIBS_USER_ID);
-
-  const { data: kotobaData } = await supabase
-    .from("kotoba")
-    .select("mastery_level, next_review_date, weak_score, jlpt_level, perf_by_type, word")
+  const { data: progressData } = await supabase
+    .from("user_item_progress")
+    .select(`
+      mastery_level, next_review, weak_score, perf_by_type,
+      curriculum_items!inner(item_type, value, jlpt_level)
+    `)
     .eq("user_id", BIBS_USER_ID);
 
   const { data: configData } = await supabase
@@ -26,26 +22,21 @@ export async function getLearningContext() {
     .eq("user_id", BIBS_USER_ID)
     .single();
 
-  const kanji  = kanjiData  ?? [];
-  const kotoba = kotobaData ?? [];
-  const all    = [...kanji, ...kotoba];
+  const all    = progressData ?? [];
+  const kanji  = all.filter(p => p.curriculum_items.item_type === "kanji");
+  const kotoba = all.filter(p => p.curriculum_items.item_type === "kotoba");
   const total  = all.length;
 
-  // Due today
-  const dueToday = all.filter(i => i.next_review_date <= today).length;
-
-  // Mastery breakdown
-  const mastered = all.filter(i => i.mastery_level === 5).length;
+  const dueToday       = all.filter(i => i.next_review <= today).length;
+  const mastered       = all.filter(i => i.mastery_level === 5).length;
   const masteryPercent = total > 0 ? Math.round((mastered / total) * 100) : 0;
 
-  // Top weak items (max 5 for context summary)
-  const weakItems = [...kanji, ...kotoba]
+  const weakItems = [...all]
     .filter(i => i.mastery_level < 3)
     .sort((a, b) => b.weak_score - a.weak_score)
     .slice(0, 5)
-    .map(i => i.char ?? i.word);
+    .map(i => i.curriculum_items.value);
 
-  // Weakest question type across all items
   const typeAgg = {};
   for (const item of all) {
     for (const [qtype, counts] of Object.entries(item.perf_by_type ?? {})) {
@@ -57,45 +48,36 @@ export async function getLearningContext() {
   let weakestType = null, weakestRatio = 1;
   for (const [qtype, counts] of Object.entries(typeAgg)) {
     const t = counts.correct + counts.wrong;
-    if (t > 5) { // only meaningful if enough data
+    if (t > 5) {
       const ratio = counts.correct / t;
       if (ratio < weakestRatio) { weakestRatio = ratio; weakestType = qtype; }
     }
   }
 
-  // Active JLPT level (most common level in deck)
   const jlptCounts = {};
   for (const item of all) {
-    if (item.jlpt_level && item.jlpt_level !== "unknown") {
-      jlptCounts[item.jlpt_level] = (jlptCounts[item.jlpt_level] ?? 0) + 1;
-    }
+    const jl = item.curriculum_items.jlpt_level;
+    if (jl) jlptCounts[jl] = (jlptCounts[jl] ?? 0) + 1;
   }
   const activeJlpt = Object.entries(jlptCounts).sort((a,b) => b[1]-a[1])[0]?.[0] ?? "N5";
 
   return {
-    // Greeting info
     owner:            configData?.preferences?.owner ?? "Bibs",
     total_kanji:      kanji.length,
     total_kotoba:     kotoba.length,
     total_items:      total,
     mastered,
     mastery_percent:  masteryPercent,
-
-    // Study queue
     due_today:        dueToday,
-
-    // Intelligence signals
     active_jlpt:      activeJlpt,
     weakest_question_type: weakestType,
     weakest_accuracy: weakestType ? Math.round(weakestRatio * 100) : null,
     top_weak_items:   weakItems,
-
-    // Preferences
     preferences:      configData?.preferences ?? {},
   };
 }
 
-// ── Get config (full — for agent initialization) ──────────────────────────────
+// ── Full config (for agent initialization) ────────────────────────────────────
 export async function getConfig() {
   const { data, error } = await supabase
     .from("config")
@@ -105,7 +87,6 @@ export async function getConfig() {
   if (error) throw new Error(`getConfig failed: ${error.message}`);
 
   const context = await getLearningContext();
-
   return {
     identity:        data.identity,
     preferences:     data.preferences,

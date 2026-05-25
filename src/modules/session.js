@@ -1,14 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // SESSION MODULE
-// Responsibility: build and serve study sessions.
-// Default source = "due" (SM-2 scheduled cards).
-// Session composition priority:
-//   1. Due today (SM-2) — always first
-//   2. Weak items (high weak_score) — if source=weak
-//   3. New items (never reviewed) — if source=new
-//   4. Today's additions — if source=today
+// Builds study sessions from user_item_progress joined with curriculum_items.
+// source=new: progress rows with review_count=0 (added via MemoLearning).
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase, BIBS_USER_ID } from "../db.js";
+import { PROGRESS_SELECT, mapProgress } from "./scheduler.js";
 
 const TODAY = () => new Date().toISOString().split("T")[0];
 
@@ -19,17 +15,21 @@ export async function createSession({ level, source, type, count }) {
   const studyLevel  = level  ?? "all";
   const studySource = source ?? "due";
 
-  const buildQuery = (table) => {
-    let q = supabase.from(table).select("*").eq("user_id", BIBS_USER_ID);
+  const buildQuery = (itemType) => {
+    let q = supabase
+      .from("user_item_progress")
+      .select(PROGRESS_SELECT)
+      .eq("user_id", BIBS_USER_ID)
+      .eq("curriculum_items.item_type", itemType);
 
-    if (studyLevel !== "all") q = q.eq("jlpt_level", studyLevel);
+    if (studyLevel !== "all") q = q.eq("curriculum_items.jlpt_level", studyLevel);
 
     switch (studySource) {
       case "due":
-        q = q.lte("next_review_date", today).order("weak_score", { ascending: false });
+        q = q.lte("next_review", today).order("weak_score", { ascending: false });
         break;
       case "new":
-        q = q.eq("review_count", 0).order("seen_in_texts", { ascending: false });
+        q = q.eq("review_count", 0).order("created_at", { ascending: false });
         break;
       case "weak":
         q = q.lt("mastery_level", 3).order("weak_score", { ascending: false });
@@ -55,15 +55,15 @@ export async function createSession({ level, source, type, count }) {
   if (studyType === "kanji" || studyType === "both") {
     const limit = studyType === "both" ? Math.ceil(itemCount / 2) : itemCount;
     const { data, error } = await buildQuery("kanji").limit(limit);
-    if (error) throw new Error(`createSession kanji failed: ${error.message}`);
-    kanjiItems = (data ?? []).map(k => ({ ...k, item_type: "kanji" }));
+    if (error) throw new Error(`createSession kanji: ${error.message}`);
+    kanjiItems = (data ?? []).map(mapProgress);
   }
 
   if (studyType === "kotoba" || studyType === "both") {
     const limit = studyType === "both" ? Math.floor(itemCount / 2) : itemCount;
     const { data, error } = await buildQuery("kotoba").limit(limit);
-    if (error) throw new Error(`createSession kotoba failed: ${error.message}`);
-    kotobaItems = (data ?? []).map(k => ({ ...k, item_type: "kotoba" }));
+    if (error) throw new Error(`createSession kotoba: ${error.message}`);
+    kotobaItems = (data ?? []).map(mapProgress);
   }
 
   const allItems = [...kanjiItems, ...kotobaItems];
@@ -86,8 +86,7 @@ export async function createSession({ level, source, type, count }) {
     })
     .select()
     .single();
-
-  if (sessionError) throw new Error(`createSession insert failed: ${sessionError.message}`);
+  if (sessionError) throw new Error(`createSession insert: ${sessionError.message}`);
 
   return {
     success:      true,
@@ -96,29 +95,29 @@ export async function createSession({ level, source, type, count }) {
     kanji_count:  kanjiItems.length,
     kotoba_count: kotobaItems.length,
     source_used:  studySource,
-    message:      `Session ready! ${allItems.length} items (${kanjiItems.length} kanji, ${kotobaItems.length} kotoba). Open your study site.`,
+    message: `Session ready! ${allItems.length} items (${kanjiItems.length} kanji, ${kotobaItems.length} kotoba). Open your study site.`,
   };
 }
+
 export async function getPendingSession() {
   const { data, error } = await supabase
-    .from('sessions')
-    .select('id, date, params, items')
-    .eq('user_id', BIBS_USER_ID)
-    .eq('status', 'pending')
-    .order('created_at', { ascending: false })
+    .from("sessions")
+    .select("id, date, params, items")
+    .eq("user_id", BIBS_USER_ID)
+    .eq("status", "pending")
+    .order("created_at", { ascending: false })
     .limit(1)
-    .single()
-  
-  if (error) return null
-  return data
+    .single();
+  if (error) return null;
+  return data;
 }
 
 export async function getSession(sessionId) {
   const { data, error } = await supabase
-    .from('sessions')
-    .select('*')
-    .eq('id', sessionId)
-    .single()
-  if (error) throw new Error(`getSession failed: ${error.message}`)
-  return data
+    .from("sessions")
+    .select("*")
+    .eq("id", sessionId)
+    .single();
+  if (error) throw new Error(`getSession failed: ${error.message}`);
+  return data;
 }

@@ -1,18 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // REVIEW MODULE
-// Responsibility: process quiz answers, run SM-2, log events, update state.
-// This is the core loop — every other module supports this one.
-//
-// Flow per answer:
-//   1. Fetch current item state
-//   2. Run SM-2 → new interval, ease, review date
-//   3. Compute mastery from multiple signals
-//   4. Compute weak_score heuristic
-//   5. Update perf_by_type cache
-//   6. Update response time rolling average
-//   7. Update confusion tracking if wrong
-//   8. Write updated state to kanji/kotoba
-//   9. Insert review_log event (permanent history)
+// Processes quiz answers: SM-2, mastery, weak_score, review_log.
+// item_id = curriculum_items.id (not user_item_progress.id).
+// Creates user_item_progress row on first review if not yet present.
 // ─────────────────────────────────────────────────────────────────────────────
 import { supabase, BIBS_USER_ID } from "../db.js";
 import { calculateSM2, ALGORITHM_VERSION } from "./scheduler.js";
@@ -21,27 +11,38 @@ import { computeMastery, computeWeakScore } from "./mastery.js";
 export async function processQuizAnswer({
   session_id,
   item_type,
-  item_id,
+  item_id,           // = curriculum_items.id
   correct,
-  rating,           // again | hard | good | easy
-  question_type,    // meaning | onyomi | kunyomi | reading | production
+  rating,            // again | hard | good | easy
+  question_type,     // meaning | onyomi | kunyomi | reading | production
   user_answer,
   correct_answer,
-  confused_with_id, // UUID of item picked when wrong (optional)
-  response_ms,      // ms taken to answer (optional)
-  hints_used,       // boolean (optional)
+  confused_with_id,
+  response_ms,
+  hints_used,
 }) {
-  const table = item_type === "kanji" ? "kanji" : "kotoba";
   const today = new Date().toISOString().split("T")[0];
 
-  // 1. Fetch current state
-  const { data: current, error: fetchError } = await supabase
-    .from(table)
-    .select("mastery_level, times_correct, times_wrong, streak, interval, ease_factor, review_count, perf_by_type, confused_with, avg_response_ms, response_samples, last_correct_date, weak_score")
-    .eq("id", item_id)
+  // 1. Fetch progress row (create if first review)
+  let { data: current, error: fetchErr } = await supabase
+    .from("user_item_progress")
+    .select("id, mastery_level, times_correct, times_wrong, streak, interval, ease_factor, review_count, perf_by_type, confused_with, avg_response_ms, response_samples, last_correct_date, weak_score")
     .eq("user_id", BIBS_USER_ID)
+    .eq("curriculum_item_id", item_id)
     .single();
-  if (fetchError) throw new Error(`processQuizAnswer fetch failed: ${fetchError.message}`);
+
+  if (fetchErr?.code === "PGRST116") {
+    // No row — create default progress
+    const { data: created, error: createErr } = await supabase
+      .from("user_item_progress")
+      .insert({ user_id: BIBS_USER_ID, curriculum_item_id: item_id, first_seen: today })
+      .select()
+      .single();
+    if (createErr) throw new Error(`processQuizAnswer create progress: ${createErr.message}`);
+    current = created;
+  } else if (fetchErr) {
+    throw new Error(`processQuizAnswer fetch: ${fetchErr.message}`);
+  }
 
   // 2. SM-2
   const sm2 = await calculateSM2({
@@ -66,18 +67,18 @@ export async function processQuizAnswer({
     review_count:    (current.review_count ?? 0) + 1,
   });
 
-  // 4. Weak score
+  // 4. Weak score (seen_in_texts removed from schema — pass 0)
   const newWeakScore = computeWeakScore({
-    times_wrong:      newTimesWrong,
-    seen_in_texts:    current.seen_in_texts ?? 0,
-    streak:           newStreak,
-    mastery_level:    newMastery,
+    times_wrong:       newTimesWrong,
+    seen_in_texts:     0,
+    streak:            newStreak,
+    mastery_level:     newMastery,
     last_correct_date: correct ? today : current.last_correct_date,
-    avg_response_ms:  current.avg_response_ms ?? 0,
-    ease_factor:      sm2.new_ease_factor,
+    avg_response_ms:   current.avg_response_ms ?? 0,
+    ease_factor:       sm2.new_ease_factor,
   });
 
-  // 5. perf_by_type cache update
+  // 5. perf_by_type cache
   const perf = { ...(current.perf_by_type ?? {}) };
   const typePerf = perf[question_type] ?? { correct: 0, wrong: 0 };
   perf[question_type] = {
@@ -95,10 +96,9 @@ export async function processQuizAnswer({
   // 7. Confusion tracking
   let confusedWith  = current.confused_with ?? [];
   let confusionType = null;
-
   if (!correct && user_answer) {
     if (!confusedWith.includes(user_answer)) {
-      confusedWith = [...confusedWith, user_answer].slice(-10); // keep last 10
+      confusedWith = [...confusedWith, user_answer].slice(-10);
     }
     confusionType = classifyConfusion(question_type);
   }
@@ -107,7 +107,7 @@ export async function processQuizAnswer({
   const updates = {
     interval:         sm2.new_interval,
     ease_factor:      sm2.new_ease_factor,
-    next_review_date: sm2.new_review_date,
+    next_review:      sm2.new_review_date,
     review_count:     (current.review_count ?? 0) + 1,
     last_rating:      rating,
     mastery_level:    newMastery,
@@ -120,40 +120,39 @@ export async function processQuizAnswer({
     response_samples: samples,
     confused_with:    confusedWith,
     last_seen:        today,
-    ...(confusionType             ? { confusion_type: confusionType }   : {}),
-    ...(correct                   ? { last_correct_date: today }        : { last_wrong_date: today }),
+    ...(confusionType ? { confusion_type: confusionType }  : {}),
+    ...(correct       ? { last_correct_date: today }       : { last_wrong_date: today }),
   };
 
-  const { error: updateError } = await supabase
-    .from(table)
+  const { error: updateErr } = await supabase
+    .from("user_item_progress")
     .update(updates)
-    .eq("id", item_id)
-    .eq("user_id", BIBS_USER_ID);
-  if (updateError) throw new Error(`processQuizAnswer update failed: ${updateError.message}`);
+    .eq("id", current.id);
+  if (updateErr) throw new Error(`processQuizAnswer update: ${updateErr.message}`);
 
-  // 9. Insert review_log (permanent event — never delete)
-  const { error: logError } = await supabase.from("review_log").insert({
-    user_id:           BIBS_USER_ID,
-    session_id:        session_id  ?? null,
+  // 9. review_log (permanent — never delete)
+  const { error: logErr } = await supabase.from("review_log").insert({
+    user_id:            BIBS_USER_ID,
+    session_id:         session_id     ?? null,
+    curriculum_item_id: item_id,
     item_type,
-    item_id,
     question_type,
     rating,
     correct,
-    response_ms:       response_ms ?? null,
-    ease_before:       current.ease_factor,
-    interval_before:   current.interval,
-    mastery_before:    current.mastery_level,
-    ease_after:        sm2.new_ease_factor,
-    interval_after:    sm2.new_interval,
-    mastery_after:     newMastery,
-    user_answer:       user_answer    ?? null,
-    correct_answer:    correct_answer ?? null,
-    confused_with_id:  confused_with_id ?? null,
-    hints_used:        hints_used ?? false,
-    algorithm_version: ALGORITHM_VERSION,
+    response_ms:        response_ms    ?? null,
+    ease_before:        current.ease_factor,
+    interval_before:    current.interval,
+    mastery_before:     current.mastery_level,
+    ease_after:         sm2.new_ease_factor,
+    interval_after:     sm2.new_interval,
+    mastery_after:      newMastery,
+    user_answer:        user_answer    ?? null,
+    correct_answer:     correct_answer ?? null,
+    confused_with_id:   confused_with_id ?? null,
+    hints_used:         hints_used ?? false,
+    algorithm_version:  ALGORITHM_VERSION,
   });
-  if (logError) throw new Error(`review_log insert failed: ${logError.message}`);
+  if (logErr) throw new Error(`review_log insert: ${logErr.message}`);
 
   return {
     success:          true,
@@ -164,13 +163,12 @@ export async function processQuizAnswer({
     new_mastery:      newMastery,
     new_interval:     sm2.new_interval,
     new_ease_factor:  Math.round(sm2.new_ease_factor * 100) / 100,
-    next_review_date: sm2.new_review_date,
+    next_review:      sm2.new_review_date,
     new_streak:       newStreak,
     new_weak_score:   newWeakScore,
   };
 }
 
-// Classify confusion type from question type
 function classifyConfusion(question_type) {
   if (question_type === "meaning")    return "meaning";
   if (question_type === "production") return "production";

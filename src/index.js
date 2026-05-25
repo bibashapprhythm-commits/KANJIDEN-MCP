@@ -38,25 +38,14 @@ const CORS = {
 // Called by website after session finishes. Marks completed + saves results.
 import { supabase, BIBS_USER_ID } from "./db.js";
 
-async function completeSession({ session_id, answers, marks_percent }) {
+async function completeSession({ session_id, marks_percent }) {
   if (!session_id) throw new Error("session_id required");
-
-  // Mark session completed
-  await supabase.from("sessions").update({ status: "completed" }).eq("id", session_id);
-
-  // Save results summary
-  const { error } = await supabase.from("results").insert({
-    user_id:       BIBS_USER_ID,
-    session_id,
-    scores:        Object.fromEntries(
-                     (answers ?? []).map(a => [a.item_id, { correct: a.correct, rating: a.rating }])
-                   ),
-    marks_percent: marks_percent ?? 0,
-    weak_items:    (answers ?? []).filter(a => !a.correct).map(a => a.item_id),
-  });
+  const { error } = await supabase
+    .from("sessions")
+    .update({ status: "completed" })
+    .eq("id", session_id);
   if (error) throw new Error(`completeSession failed: ${error.message}`);
-
-  return { success: true, session_id, marks_percent };
+  return { success: true, session_id, marks_percent: marks_percent ?? 0 };
 }
 
 // ── REST tool map (website uses these directly) ───────────────────────────────
