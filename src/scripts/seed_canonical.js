@@ -1,29 +1,26 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────────────────────────────────
-// seed_canonical.js — Phase A + B seeder
-// Downloads KANJIDIC2 + JMdict XML, inserts N5-N2 curriculum data.
-// No Claude API calls — run enrich_items.js separately for Phase C.
-//
-// Usage: node src/scripts/seed_canonical.js
+// seed_canonical.js — v2
+// Source: jmdict-simplified 3.6.2 (JSON, no XML, no downloads)
+// Usage:  node src/scripts/seed_canonical.js
 // ─────────────────────────────────────────────────────────────────────────────
 
 import "dotenv/config";
-import fs           from "fs";
-import path         from "path";
-import https        from "https";
-import http         from "http";
-import zlib         from "zlib";
+import fs   from "fs";
+import path from "path";
 import { fileURLToPath } from "url";
-import { parseStringPromise } from "xml2js";
-import { createClient }      from "@supabase/supabase-js";
+import { createClient }  from "@supabase/supabase-js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR  = path.join(__dirname, "../data");
+const __dirname  = path.dirname(fileURLToPath(import.meta.url));
+const RESOURCES  = path.join(__dirname, "../../resources");
+const VERSION    = "3.6.2";
 
-const KANJIDIC2_URL  = "http://www.edrdg.org/kanjidic/kanjidic2.xml.gz";
-const JMDICT_URL     = "http://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz";
-const KANJIDIC2_PATH = path.join(DATA_DIR, "kanjidic2.xml.gz");
-const JMDICT_PATH    = path.join(DATA_DIR, "jmdict_e.gz");
+const FILE = {
+  kanjidic2: path.join(RESOURCES, `kanjidic2-en-${VERSION}.json`),
+  jmdict:    path.join(RESOURCES, `jmdict-eng-${VERSION}.json`),
+  examples:  path.join(RESOURCES, `jmdict-examples-eng-${VERSION}.json`),
+  kradfile:  path.join(RESOURCES, `kradfile-${VERSION}.json`),
+};
 
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in .env");
@@ -36,68 +33,38 @@ const supabase = createClient(
   { auth: { persistSession: false } }
 );
 
-// ── JLPT old 4-level → N-level ────────────────────────────────────────────────
-const JLPT_MAP = { "4": "N5", "3": "N4", "2": "N3", "1": "N2" };
+// ── Constants ─────────────────────────────────────────────────────────────────
 
-// ── Kangxi radical number → character ────────────────────────────────────────
-// Only the 20 radicals seeded in our radicals table
+// kanjidic2 jlptLevel is integer: 4=N5 3=N4 2=N3 1=N2
+const JLPT_INT_MAP = { 4: "N5", 3: "N4", 2: "N3", 1: "N2" };
+
 const KANGXI_TO_CHAR = {
-  9:   "亻",
-  30:  "口",
-  32:  "土",
-  38:  "女",
-  39:  "子",
-  46:  "山",
-  61:  "心",
-  64:  "扌",
-  72:  "日",
-  74:  "月",
-  75:  "木",
-  85:  "氵",
-  86:  "火",
-  109: "目",
-  128: "耳",
-  149: "言",
-  157: "足",
-  167: "金",
+  9:   "亻", 30:  "口", 32:  "土", 38:  "女", 39:  "子",
+  46:  "山", 61:  "心", 64:  "扌", 72:  "日", 74:  "月",
+  75:  "木", 85:  "氵", 86:  "火", 109: "目", 128: "耳",
+  149: "言", 157: "足", 167: "金",
 };
 
-// ── JMdict entity → replacement value ────────────────────────────────────────
-const JMDICT_ENTITIES = {
-  // JLPT (old 4-level → N-level string)
-  "jlpt-4": "N5", "jlpt-3": "N4", "jlpt-2": "N3", "jlpt-1": "N2",
-  // Part of speech → grammar tag values
-  "n": "noun", "n-adv": "adverb", "n-suf": "suffix", "n-pref": "prefix",
-  "n-t": "noun",
-  "v1": "verb_ru", "v1-s": "verb_ru",
-  "v5r": "verb_u", "v5k": "verb_u", "v5g": "verb_u", "v5s": "verb_u",
-  "v5t": "verb_u", "v5n": "verb_u", "v5b": "verb_u", "v5m": "verb_u",
-  "v5aru": "verb_u", "v5r-i": "verb_u", "v5u": "verb_u", "v5u-s": "verb_u",
-  "v5k-s": "verb_u",
-  "vk": "verb_irregular", "vs-i": "verb_irregular",
-  "vs-s": "verb_u", "vs": "verb_u",
-  "adj-i": "i_adjective", "adj-ix": "i_adjective",
+const POS_MAP = {
+  "n":      "noun",             "n-adv":  "adverb",
+  "n-suf":  "suffix",          "n-pref": "prefix",   "n-t": "noun",
+  "v1":     "verb_ru",         "v1-s":   "verb_ru",
+  "v5r":    "verb_u",          "v5k":    "verb_u",   "v5g":   "verb_u",
+  "v5s":    "verb_u",          "v5t":    "verb_u",   "v5n":   "verb_u",
+  "v5b":    "verb_u",          "v5m":    "verb_u",   "v5aru": "verb_u",
+  "v5r-i":  "verb_u",          "v5u":    "verb_u",   "v5u-s": "verb_u",
+  "v5k-s":  "verb_u",          "vs-s":   "verb_u",   "vs":    "verb_u",
+  "vk":     "verb_irregular",  "vs-i":   "verb_irregular",
+  "adj-i":  "i_adjective",     "adj-ix": "i_adjective",
   "adj-na": "na_adjective",
-  "adv": "adverb", "adv-to": "adverb",
-  "prt": "particle",
-  "conj": "conjunction",
-  "pref": "prefix",
-  "suf": "suffix",
-  "ctr": "counter",
-  "int": "", "exp": "",
-  // Misc / field tags — strip
-  "P": "", "uk": "", "ek": "", "ik": "", "oK": "", "io": "", "iK": "",
-  "ok": "", "oik": "", "arch": "", "col": "", "fam": "", "fem": "",
-  "hon": "", "hum": "", "pol": "", "sl": "", "vulg": "", "id": "",
-  "proverb": "", "quote": "", "rare": "", "obsc": "", "dated": "", "obs": "",
-  "sens": "", "derog": "", "joc": "",
-  "MA": "", "comp": "", "food": "", "mus": "", "math": "", "med": "",
-  "biol": "", "chem": "", "physics": "", "law": "", "ling": "", "mil": "",
+  "adv":    "adverb",          "adv-to": "adverb",
+  "prt":    "particle",        "conj":   "conjunction",
+  "pref":   "prefix",          "suf":    "suffix",   "ctr": "counter",
 };
 
-// ── N5 Kanji — Phase B curated tag map ───────────────────────────────────────
-// Tags: semantic + visual_group + cognitive + frequency (within N5)
-// Priority: 1 = first to teach within N5
+const GRAMMAR_TAG_SET = new Set(Object.values(POS_MAP).filter(Boolean));
+
+// ── N5 Kanji — hand-curated tags + priority ───────────────────────────────────
 const N5_CURATION = {
   "一": { tags: ["numbers","simple_shape","easy_shape","very_high"],              priority: 1  },
   "二": { tags: ["numbers","simple_shape","easy_shape","very_high"],              priority: 2  },
@@ -196,14 +163,11 @@ const N5_CURATION = {
 // ── Kana → Hepburn romaji ─────────────────────────────────────────────────────
 function kanaToRomaji(text) {
   if (!text) return "";
-
-  // Katakana → hiragana (offset 0x60)
   let s = "";
   for (const ch of text) {
     const c = ch.charCodeAt(0);
     s += c >= 0x30A1 && c <= 0x30F6 ? String.fromCharCode(c - 0x60) : ch;
   }
-
   const MAP = {
     "きゃ":"kya","きゅ":"kyu","きょ":"kyo","しゃ":"sha","しゅ":"shu","しょ":"sho",
     "ちゃ":"cha","ちゅ":"chu","ちょ":"cho","にゃ":"nya","にゅ":"nyu","にょ":"nyo",
@@ -227,411 +191,384 @@ function kanaToRomaji(text) {
     "ば":"ba","び":"bi","ぶ":"bu","べ":"be","ぼ":"bo",
     "ぱ":"pa","ぴ":"pi","ぷ":"pu","ぺ":"pe","ぽ":"po",
   };
-
   let result = "";
   let i = 0;
   while (i < s.length) {
     const two = s[i] + (s[i + 1] || "");
     if (MAP[two]) { result += MAP[two]; i += 2; continue; }
-    if (s[i] === "っ") {
-      const nextRomaji = MAP[s[i + 1]] || "";
-      result += nextRomaji[0] || "";
-      i++;
-      continue;
-    }
+    if (s[i] === "っ") { result += (MAP[s[i + 1]] || "")[0] || ""; i++; continue; }
     result += MAP[s[i]] || s[i];
     i++;
   }
   return result;
 }
 
-// ── Download with redirect support ────────────────────────────────────────────
-async function downloadFile(url, destPath) {
-  if (fs.existsSync(destPath)) {
-    console.log(`  [cached] ${path.basename(destPath)}`);
-    return;
-  }
-  console.log(`  [download] ${url}`);
+// ── DB helpers ────────────────────────────────────────────────────────────────
 
-  const download = (u) =>
-    new Promise((resolve, reject) => {
-      const proto = u.startsWith("https") ? https : http;
-      const file  = fs.createWriteStream(destPath);
-
-      proto.get(u, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          file.destroy();
-          if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-          download(res.headers.location).then(resolve, reject);
-          return;
-        }
-        res.pipe(file);
-        file.on("finish", () => { file.close(); resolve(); });
-      }).on("error", (err) => {
-        if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
-        reject(err);
-      });
-    });
-
-  await download(url);
-  console.log(`  [done] ${path.basename(destPath)}`);
+async function upsertItems(rows) {
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from("curriculum_items")
+    .upsert(rows, { onConflict: "item_type,value", ignoreDuplicates: false });
+  if (error) throw new Error(`upsert curriculum_items: ${error.message}`);
 }
 
-// ── Parse KANJIDIC2 ───────────────────────────────────────────────────────────
-async function parseKanjidic2(gzipPath) {
-  console.log("  Decompressing KANJIDIC2...");
-  const compressed = fs.readFileSync(gzipPath);
-  const xml        = zlib.gunzipSync(compressed).toString("utf8");
+async function insertBatch(table, rows) {
+  if (!rows.length) return;
+  const { error } = await supabase.from(table).insert(rows);
+  if (error) throw new Error(`insert ${table}: ${error.message}`);
+}
 
-  console.log("  Parsing XML...");
-  const parsed = await parseStringPromise(xml, { explicitArray: true });
-
+// ── Parse: kanjidic2 + kradfile ───────────────────────────────────────────────
+function parseKanjidic2() {
+  console.log("  Reading kanjidic2-en + kradfile...");
+  const data = JSON.parse(fs.readFileSync(FILE.kanjidic2, "utf8"));
+  const krad = JSON.parse(fs.readFileSync(FILE.kradfile, "utf8")).kanji;
   const rows = [];
-  for (const char of parsed.kanjidic2.character) {
-    const literal = char.literal[0];
-    const misc    = char.misc?.[0] ?? {};
 
-    const jlptOld   = misc.jlpt?.[0];
-    const jlptLevel = jlptOld ? JLPT_MAP[jlptOld] : null;
+  for (const char of data.characters) {
+    const literal    = char.literal;
+    const misc       = char.misc || {};
+    const jlptLevel  = JLPT_INT_MAP[misc.jlptLevel];
     if (!jlptLevel) continue;
 
-    const rmgroup  = char.reading_meaning?.[0]?.rmgroup?.[0] ?? {};
-    const readings = rmgroup.reading ?? [];
-    const rawMeans = rmgroup.meaning ?? [];
+    const groups      = char.readingMeaning?.groups || [];
+    const allReadings = groups.flatMap(g => g.readings || []);
+    const allMeanings = groups.flatMap(g => g.meanings || []);
+    const nanori      = char.readingMeaning?.nanori || [];
 
-    const onyomi = readings
-      .filter(r => r.$?.r_type === "ja_on")
-      .map(r => (typeof r === "string" ? r : r._))
+    const onyomi  = allReadings.filter(r => r.type === "ja_on").map(r => r.value).filter(Boolean);
+    const kunyomi = allReadings
+      .filter(r => r.type === "ja_kun")
+      .map(r => r.value.replace(/\..*$/, "").replace(/^-|-$/g, ""))
       .filter(Boolean);
 
-    const kunyomi = readings
-      .filter(r => r.$?.r_type === "ja_kun")
-      .map(r => (typeof r === "string" ? r : r._)
-        .replace(/\..*$/, "")
-        .replace(/^-|-$/g, ""))
-      .filter(Boolean);
+    const englishMeanings = allMeanings.filter(m => m.lang === "en").map(m => m.value).filter(Boolean);
+    const strokeCount     = misc.strokeCounts?.[0] || null;
+    const freq            = misc.frequency    || null;
+    const grade           = misc.grade        || null;
 
-    const englishMeanings = rawMeans
-      .filter(m => !m.$ || !m.$.m_lang || m.$.m_lang === "en")
-      .map(m => (typeof m === "string" ? m : m._))
-      .filter(Boolean);
-
-    const strokeCount = parseInt(misc.stroke_count?.[0]) || null;
-    const freq        = parseInt(misc.freq?.[0])          || null;
-
-    // Kangxi radical number → character
-    const radVals      = char.radical?.[0]?.rad_value ?? [];
-    const classicalRad = radVals.find(rv => rv.$?.rad_type === "classical");
-    const radNum       = classicalRad
-      ? parseInt(typeof classicalRad === "string" ? classicalRad : classicalRad._)
-      : null;
-    const radChar = KANGXI_TO_CHAR[radNum] || null;
+    const classicalRad    = (char.radicals || []).find(r => r.type === "classical");
+    const radNum          = classicalRad?.value || null;
+    const radChar         = KANGXI_TO_CHAR[radNum] || null;
+    const visualComponents = krad[literal] || null;
 
     const romaji_on  = onyomi.map(kanaToRomaji);
     const romaji_kun = kunyomi.map(kanaToRomaji);
 
-    // Phase B: merge curated tags + auto-generated tags
-    const curation = N5_CURATION[literal] ?? null;
+    const curation = N5_CURATION[literal] || null;
     const autoTags = [jlptLevel];
-    if (freq !== null) {
-      autoTags.push(
-        freq <= 500  ? "very_high" :
-        freq <= 1500 ? "high"      :
-        freq <= 3000 ? "medium"    : "low"
-      );
-    }
-    const tags = curation
-      ? [...new Set([...curation.tags, ...autoTags])]
-      : autoTags;
+    if (freq) autoTags.push(freq <= 500 ? "very_high" : freq <= 1500 ? "high" : freq <= 3000 ? "medium" : "low");
+    const tags = curation ? [...new Set([...curation.tags, ...autoTags])] : autoTags;
 
     rows.push({
-      item_type:        "kanji",
-      value:            literal,
-      jlpt_level:       jlptLevel,
-      onyomi:           onyomi.length   ? onyomi   : null,
-      kunyomi:          kunyomi.length  ? kunyomi  : null,
-      romaji_on:        romaji_on.length  ? romaji_on  : null,
-      romaji_kun:       romaji_kun.length ? romaji_kun : null,
-      stroke_count:     strokeCount,
-      frequency_rank:   freq,
-      radical:          radChar,
-      primary_radical:  radChar,
-      core_meaning:     englishMeanings[0] ?? "",
-      reading_hiragana: kunyomi[0] ?? null,
-      reading_katakana: onyomi[0]  ?? null,
-      romaji:           romaji_kun[0] ?? romaji_on[0] ?? null,
+      item_type:         "kanji",
+      value:             literal,
+      jlpt_level:        jlptLevel,
+      onyomi:            onyomi.length    ? onyomi    : null,
+      kunyomi:           kunyomi.length   ? kunyomi   : null,
+      nanori:            nanori.length    ? nanori    : null,
+      romaji_on:         romaji_on.length  ? romaji_on  : null,
+      romaji_kun:        romaji_kun.length ? romaji_kun : null,
+      stroke_count:      strokeCount,
+      frequency_rank:    freq,
+      school_grade:      grade,
+      radical:           radChar,
+      primary_radical:   radChar,
+      visual_components: visualComponents,
+      core_meaning:      englishMeanings[0] || "",
+      meaning_extended:  englishMeanings.slice(1).join("; ") || null,
+      reading_hiragana:  kunyomi[0] || null,
+      reading_katakana:  onyomi[0]  || null,
+      romaji:            romaji_kun[0] || romaji_on[0] || null,
       tags,
-      is_core:          jlptLevel === "N5",
-      priority:         curation?.priority ?? null,
-      source_dataset:   "kanjidic2",
-      source_version:   "2024",
-      source_reference: "https://www.edrdg.org/kanjidic/kanjidic2.html",
-      curation_status:  "auto_accepted",
-      seeded_by:        "seed_canonical_v1",
-      // temp field for kanji_radicals step — stripped before DB insert
-      _radical_num:     radNum,
+      is_core:           jlptLevel === "N5",
+      priority:          curation?.priority || null,
+      source_dataset:    "kanjidic2",
+      source_version:    VERSION,
+      source_reference:  "scriptin/jmdict-simplified",
+      curation_status:   "auto_accepted",
+      seeded_by:         "seed_canonical_v2",
+      // temp fields stripped before upsert
+      _radical_num:      radNum,
+      _visual_components: visualComponents,
     });
   }
 
   return rows;
 }
 
-// ── JMdict entity replacement ─────────────────────────────────────────────────
-function applyEntities(xml) {
-  let s = xml;
-  for (const [entity, val] of Object.entries(JMDICT_ENTITIES)) {
-    s = s.replaceAll(`&${entity};`, val);
+// ── Parse: jmdict common vocab ────────────────────────────────────────────────
+function parseJmdict() {
+  console.log("  Reading jmdict-eng (common words only)...");
+  const data = JSON.parse(fs.readFileSync(FILE.jmdict, "utf8"));
+  const rows = [];
+
+  for (const word of data.words) {
+    const isCommon = (word.kanji || []).some(k => k.common) || (word.kana || []).some(k => k.common);
+    if (!isCommon) continue;
+
+    const primaryKanji = (word.kanji || []).find(k => k.common);
+    const primaryKana  = (word.kana  || []).find(k => k.common);
+    const value        = primaryKanji?.text || primaryKana?.text;
+    if (!value) continue;
+
+    const reading  = primaryKana?.text || null;
+    const altForms = [
+      ...(word.kanji || []).filter(k => k.text !== value).map(k => k.text),
+      ...(word.kana  || []).filter(k => k.text !== reading && k.text !== value).map(k => k.text),
+    ].filter(Boolean);
+
+    const firstSense  = word.sense?.[0] || {};
+    const posCodes    = firstSense.partOfSpeech || [];
+    const grammarTags = [...new Set(posCodes.map(p => POS_MAP[p]).filter(t => t && GRAMMAR_TAG_SET.has(t)))];
+
+    const verbType = posCodes.some(p => ["vk","vs-i"].includes(p))       ? "irregular"
+      : posCodes.some(p => p === "v1" || p === "v1-s")                   ? "verb_ru"
+      : posCodes.some(p => p.startsWith("v5") || ["vs-s","vs"].includes(p)) ? "verb_u"
+      : null;
+
+    const allGlosses = (word.sense || [])
+      .flatMap(s => (s.gloss || []).filter(g => g.lang === "eng").map(g => g.text));
+
+    rows.push({
+      item_type:        "kotoba",
+      value,
+      jlpt_level:       null,   // enrichment pass will add JLPT once list is sourced
+      reading_hiragana: reading,
+      romaji:           reading ? kanaToRomaji(reading) : null,
+      alt_forms:        altForms.length ? altForms : null,
+      core_meaning:     allGlosses[0] || "",
+      meaning_extended: allGlosses.slice(1, 5).join("; ") || null,
+      part_of_speech:   POS_MAP[posCodes[0]] || posCodes[0] || null,
+      verb_type:        verbType,
+      tags:             grammarTags.length ? [...grammarTags, "high"] : ["high"],
+      is_core:          false,
+      source_dataset:   "jmdict",
+      source_version:   VERSION,
+      source_reference: word.id,   // jmdict word ID — used to link examples
+      curation_status:  "auto_accepted",
+      seeded_by:        "seed_canonical_v2",
+    });
   }
-  // Preserve standard XML entities (&amp; &lt; etc.), strip remaining custom ones
-  s = s.replace(/&(?!(amp|lt|gt|apos|quot);)[a-zA-Z0-9_-]+;/g, "");
-  return s;
-}
 
-function extractFirst(xml, tag) {
-  const m = xml.match(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`));
-  return m ? m[1].trim() : null;
-}
-
-function extractAll(xml, tag) {
-  return [...xml.matchAll(new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, "g"))]
-    .map(m => m[1].trim());
-}
-
-const GRAMMAR_TAG_SET = new Set([
-  "noun","verb_u","verb_ru","verb_irregular",
-  "i_adjective","na_adjective","adverb","particle",
-  "conjunction","prefix","suffix","counter",
-]);
-
-function parseJMdictEntry(rawXml) {
-  const xml   = applyEntities(rawXml);
-  const keb   = extractFirst(xml, "keb");
-  const reb   = extractFirst(xml, "reb");
-  const value = keb || reb;
-  if (!value) return null;
-
-  const allMisc   = extractAll(xml, "misc");
-  const jlptLevel = allMisc.find(m => /^N[1-5]$/.test(m));
-  if (!jlptLevel) return null;
-
-  const altForms = [
-    ...extractAll(xml, "keb").slice(1),
-    ...extractAll(xml, "reb").slice(1),
-  ].filter(f => f !== value);
-
-  const allPos     = extractAll(xml, "pos");
-  const glosses    = extractAll(xml, "gloss");
-  const priorities = extractAll(xml, "ke_pri").concat(extractAll(xml, "re_pri"));
-  const isHighPri  = priorities.some(p => ["ichi1","news1","spec1"].includes(p));
-
-  const grammarTags = [...new Set(allPos.filter(p => GRAMMAR_TAG_SET.has(p)))];
-  const verbType    = allPos.includes("verb_irregular") ? "irregular"
-    : allPos.includes("verb_ru") ? "verb_ru"
-    : allPos.includes("verb_u")  ? "verb_u"
-    : null;
-
-  return {
-    value,
-    reading:      reb || "",
-    altForms,
-    jlptLevel,
-    grammarTags,
-    verbType,
-    partOfSpeech: allPos[0] || null,
-    coreMeaning:  glosses[0] || "",
-    isHighPri,
-  };
-}
-
-// ── Stream JMdict entries ─────────────────────────────────────────────────────
-async function parseJMdict(gzipPath) {
-  console.log("  Streaming JMdict (this takes ~1 min on Raspberry Pi)...");
-
-  return new Promise((resolve, reject) => {
-    const entries = [];
-    let buffer    = "";
-    let inEntry   = false;
-    let entryBuf  = "";
-    let count     = 0;
-
-    const fileStream = fs.createReadStream(gzipPath);
-    const gunzip     = zlib.createGunzip();
-    fileStream.pipe(gunzip);
-
-    gunzip.on("data", (chunk) => {
-      buffer += chunk.toString("utf8");
-
-      while (true) {
-        if (!inEntry) {
-          const start = buffer.indexOf("<entry>");
-          if (start === -1) {
-            buffer = buffer.slice(-20); // keep tail in case tag spans chunk boundary
-            break;
-          }
-          inEntry  = true;
-          entryBuf = buffer.slice(start);
-          buffer   = "";
-        } else {
-          const combined = entryBuf + buffer;
-          const end      = combined.indexOf("</entry>");
-          if (end === -1) {
-            entryBuf = combined;
-            buffer   = "";
-            break;
-          }
-
-          const entryXml = combined.slice(0, end + 8);
-          buffer   = combined.slice(end + 8);
-          entryBuf = "";
-          inEntry  = false;
-
-          if (entryXml.includes("&jlpt-")) {
-            const parsed = parseJMdictEntry(entryXml);
-            if (parsed) {
-              entries.push(parsed);
-              count++;
-              if (count % 500 === 0) process.stdout.write(`\r  ${count} vocab found...`);
-            }
-          }
-        }
-      }
-    });
-
-    gunzip.on("end", () => {
-      process.stdout.write(`\r  ${count} vocab entries found      \n`);
-      resolve(entries);
-    });
-    gunzip.on("error", reject);
-    fileStream.on("error", reject);
+  // Deduplicate by value — jmdict can have multiple entries mapping to same primary form
+  const seen = new Set();
+  return rows.filter(r => {
+    if (seen.has(r.value)) return false;
+    seen.add(r.value);
+    return true;
   });
 }
 
-// ── Batch upsert ──────────────────────────────────────────────────────────────
-async function upsertBatch(rows) {
-  if (!rows.length) return;
-  const { error } = await supabase
-    .from("curriculum_items")
-    .upsert(rows, { onConflict: "item_type,value", ignoreDuplicates: false });
-  if (error) throw new Error(`upsert error: ${error.message}`);
-}
-
-// ── Link kanji → radicals ─────────────────────────────────────────────────────
-async function insertKanjiRadicals(kanjiRows) {
-  const { data: radRows } = await supabase.from("radicals").select("id, radical");
-  const radMap = new Map((radRows ?? []).map(r => [r.radical, r.id]));
-
+// ── Step: seed kanji_components ───────────────────────────────────────────────
+async function seedKanjiComponents(kanjiRows) {
   const chars = kanjiRows.map(k => k.value);
-  const { data: inserted, error } = await supabase
-    .from("curriculum_items")
-    .select("id, value, radical")
-    .eq("item_type", "kanji")
-    .in("value", chars);
-  if (error) { console.warn("  kanji_radicals fetch failed:", error.message); return; }
 
-  const relRows = [];
-  for (const kanji of inserted ?? []) {
-    if (!kanji.radical || !radMap.has(kanji.radical)) continue;
-    relRows.push({
-      kanji_id:   kanji.id,
-      radical_id: radMap.get(kanji.radical),
-      is_primary: true,
-      role_type:  "primary",
+  // Batch .in() to avoid URL-length 400s (PostgREST limit ~8KB)
+  const IN_BATCH = 300;
+  const allDbKanji = [];
+  for (let i = 0; i < chars.length; i += IN_BATCH) {
+    const { data: batch, error } = await supabase
+      .from("curriculum_items")
+      .select("id, value")
+      .eq("item_type", "kanji")
+      .in("value", chars.slice(i, i + IN_BATCH));
+    if (error) throw new Error(`fetch kanji ids: ${error.message}`);
+    allDbKanji.push(...(batch || []));
+  }
+
+  const valueToId     = new Map(allDbKanji.map(k => [k.value, k.id]));
+  const componentRows = [];
+
+  for (const kanji of kanjiRows) {
+    const kanjiId = valueToId.get(kanji.value);
+    if (!kanjiId || !kanji._visual_components) continue;
+    kanji._visual_components.forEach((component, idx) => {
+      componentRows.push({ kanji_id: kanjiId, component, position: idx, component_type: "radical" });
     });
   }
 
-  if (!relRows.length) { console.log("  No radical links to insert"); return; }
+  if (!componentRows.length) return 0;
 
-  // Idempotent: delete existing then insert fresh
-  const kanjiIds = relRows.map(r => r.kanji_id);
-  await supabase.from("kanji_radicals").delete().in("kanji_id", kanjiIds);
+  const kanjiIds = [...new Set(componentRows.map(r => r.kanji_id))];
+  await supabase.from("kanji_components").delete().in("kanji_id", kanjiIds);
 
-  const { error: insertErr } = await supabase.from("kanji_radicals").insert(relRows);
-  if (insertErr) console.warn("  kanji_radicals insert warning:", insertErr.message);
-  else console.log(`  Linked ${relRows.length} kanji ↔ radical relationships`);
+  const BATCH = 200;
+  for (let i = 0; i < componentRows.length; i += BATCH) {
+    await insertBatch("kanji_components", componentRows.slice(i, i + BATCH));
+  }
+  return componentRows.length;
+}
+
+// ── Step: link kanji ↔ radicals ───────────────────────────────────────────────
+async function insertKanjiRadicals(kanjiRows) {
+  const { data: radRows } = await supabase.from("radicals").select("id, radical");
+  const radMap = new Map((radRows || []).map(r => [r.radical, r.id]));
+
+  const chars = kanjiRows.map(k => k.value);
+  const IN_BATCH = 300;
+  const inserted = [];
+  for (let i = 0; i < chars.length; i += IN_BATCH) {
+    const { data: batch } = await supabase
+      .from("curriculum_items")
+      .select("id, value, radical")
+      .eq("item_type", "kanji")
+      .in("value", chars.slice(i, i + IN_BATCH));
+    inserted.push(...(batch || []));
+  }
+
+  const relRows = [];
+  for (const kanji of inserted) {
+    if (!kanji.radical || !radMap.has(kanji.radical)) continue;
+    relRows.push({ kanji_id: kanji.id, radical_id: radMap.get(kanji.radical), is_primary: true, role_type: "primary" });
+  }
+
+  if (!relRows.length) { console.log("  No radical links"); return; }
+  const kanjiIds = [...new Set(relRows.map(r => r.kanji_id))];
+  // Batch delete to avoid URL-length 400 (UUIDs are long)
+  const DEL_BATCH = 100;
+  for (let i = 0; i < kanjiIds.length; i += DEL_BATCH) {
+    await supabase.from("kanji_radicals").delete().in("kanji_id", kanjiIds.slice(i, i + DEL_BATCH));
+  }
+  const { error } = await supabase.from("kanji_radicals").insert(relRows);
+  if (error) console.warn("  kanji_radicals warning:", error.message);
+  else console.log(`  Linked ${relRows.length} kanji ↔ radicals`);
+}
+
+// ── Step: seed Tatoeba sentences ──────────────────────────────────────────────
+async function seedExamples() {
+  console.log("  Reading jmdict-examples-eng...");
+  const data = JSON.parse(fs.readFileSync(FILE.examples, "utf8"));
+
+  // Build map: jmdict word ID → curriculum_item UUID (paginate — default limit 1000)
+  const PAGE = 1000;
+  let from = 0;
+  const kotobaItems = [];
+  while (true) {
+    const { data, error: fetchErr } = await supabase
+      .from("curriculum_items")
+      .select("id, source_reference")
+      .eq("item_type", "kotoba")
+      .eq("source_dataset", "jmdict")
+      .range(from, from + PAGE - 1);
+    if (fetchErr) throw new Error(`fetch kotoba ids: ${fetchErr.message}`);
+    if (!data || data.length === 0) break;
+    kotobaItems.push(...data);
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+
+  const refToId = new Map((kotobaItems || []).map(k => [k.source_reference, k.id]));
+  console.log(`  Matching examples against ${refToId.size} seeded kotoba...`);
+
+  const sentenceRows = [];
+  for (const word of data.words) {
+    const itemId = refToId.get(word.id);
+    if (!itemId) continue;
+    for (const sense of word.sense || []) {
+      for (const ex of sense.examples || []) {
+        const jpText = ex.sentences?.find(s => s.lang === "jpn")?.text;
+        const enText = ex.sentences?.find(s => s.lang === "eng")?.text;
+        if (!jpText || !enText) continue; // english is NOT NULL in schema
+        sentenceRows.push({
+          curriculum_item_id: itemId,
+          japanese:           jpText,
+          english:            enText,
+          sentence_type:      "imported",
+          generated_by:       "tatoeba",
+          prompt_version:     ex.source?.value || null, // Tatoeba sentence ID
+          validated:          false,
+          curation_status:    "auto_accepted",
+        });
+      }
+    }
+  }
+
+  if (!sentenceRows.length) return 0;
+
+  // Clean existing imported sentences before re-seed (no unique constraint)
+  console.log("  Clearing existing imported sentences...");
+  await supabase.from("generated_sentences").delete().eq("sentence_type", "imported");
+
+  const BATCH = 200;
+  for (let i = 0; i < sentenceRows.length; i += BATCH) {
+    await insertBatch("generated_sentences", sentenceRows.slice(i, i + BATCH));
+    process.stdout.write(`\r  ${Math.min(i + BATCH, sentenceRows.length)}/${sentenceRows.length} sentences`);
+  }
+  console.log("");
+  return sentenceRows.length;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
   console.log("═══════════════════════════════════════════════════");
-  console.log(" KanjiDen Canonical Seeder — Phase A + B");
+  console.log(" KanjiDen Canonical Seeder v2");
+  console.log(` Source: jmdict-simplified ${VERSION}`);
   console.log("═══════════════════════════════════════════════════\n");
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // Verify all files present
+  for (const [name, fp] of Object.entries(FILE)) {
+    if (!fs.existsSync(fp)) {
+      console.error(`[FATAL] Missing file: ${fp}`);
+      console.error(`  Download from: github.com/scriptin/jmdict-simplified/releases`);
+      process.exit(1);
+    }
+  }
+  console.log("All source files found.\n");
 
-  // 1. Download
-  console.log("[1/5] Downloading source data...");
-  await downloadFile(KANJIDIC2_URL, KANJIDIC2_PATH);
-  await downloadFile(JMDICT_URL, JMDICT_PATH);
+  const BATCH = 200;
 
-  // 2. Parse kanji
-  console.log("\n[2/5] Parsing KANJIDIC2...");
-  const kanjiRows = await parseKanjidic2(KANJIDIC2_PATH);
-  console.log(`  Total JLPT kanji: ${kanjiRows.length}`);
-  for (const l of ["N5","N4","N3","N2"]) {
+  // ── [1/5] Parse kanji ────────────────────────────────────────
+  console.log("[1/5] Parsing kanjidic2...");
+  const kanjiRows = parseKanjidic2();
+  console.log(`  ${kanjiRows.length} JLPT kanji`);
+  for (const l of ["N5","N4","N3","N2"])
     console.log(`    ${l}: ${kanjiRows.filter(k => k.jlpt_level === l).length}`);
-  }
 
-  // 3. Parse vocab
-  console.log("\n[3/5] Parsing JMdict...");
-  const jmdictEntries = await parseJMdict(JMDICT_PATH);
-  for (const l of ["N5","N4","N3","N2"]) {
-    console.log(`    ${l}: ${jmdictEntries.filter(e => e.jlptLevel === l).length} vocab`);
-  }
-
-  // Build kotoba rows
-  const kotobaRows = jmdictEntries.map(e => ({
-    item_type:        "kotoba",
-    value:            e.value,
-    jlpt_level:       e.jlptLevel,
-    reading_hiragana: e.reading || null,
-    romaji:           e.reading ? kanaToRomaji(e.reading) : null,
-    alt_forms:        e.altForms.length ? e.altForms : null,
-    core_meaning:     e.coreMeaning,
-    tags:             [...new Set([e.jlptLevel, ...e.grammarTags, e.isHighPri ? "very_high" : "high"])],
-    is_core:          e.jlptLevel === "N5" && e.isHighPri,
-    part_of_speech:   e.partOfSpeech,
-    verb_type:        e.verbType,
-    source_dataset:   "jmdict",
-    source_version:   "2024",
-    source_reference: "https://www.edrdg.org/jmdict/j_jmdict.html",
-    curation_status:  "auto_accepted",
-    seeded_by:        "seed_canonical_v1",
-  }));
-
-  // 4. Insert
-  console.log("\n[4/5] Inserting curriculum items...");
-  const BATCH = 100;
-
-  // Strip temp _radical_num field before DB insert
-  const kanjiInsert = kanjiRows.map(({ _radical_num, ...rest }) => rest);
-
-  console.log(`  Kanji: ${kanjiInsert.length} items`);
+  // ── [2/5] Upsert kanji ───────────────────────────────────────
+  console.log("\n[2/5] Upserting kanji...");
+  const kanjiInsert = kanjiRows.map(({ _radical_num, _visual_components, ...rest }) => rest);
   for (let i = 0; i < kanjiInsert.length; i += BATCH) {
-    await upsertBatch(kanjiInsert.slice(i, i + BATCH));
+    await upsertItems(kanjiInsert.slice(i, i + BATCH));
     process.stdout.write(`\r  ${Math.min(i + BATCH, kanjiInsert.length)}/${kanjiInsert.length} kanji`);
   }
   console.log("");
 
-  console.log(`  Kotoba: ${kotobaRows.length} items`);
+  // ── [3/5] Kanji components + radical links ───────────────────
+  console.log("\n[3/5] Seeding kanji_components + radical links...");
+  const compCount = await seedKanjiComponents(kanjiRows);
+  console.log(`  ${compCount} component rows`);
+  await insertKanjiRadicals(kanjiRows);
+
+  // ── [4/5] Parse + upsert kotoba ──────────────────────────────
+  console.log("\n[4/5] Parsing + upserting kotoba (common=true)...");
+  const kotobaRows = parseJmdict();
+  console.log(`  ${kotobaRows.length} common words`);
   for (let i = 0; i < kotobaRows.length; i += BATCH) {
-    await upsertBatch(kotobaRows.slice(i, i + BATCH));
+    await upsertItems(kotobaRows.slice(i, i + BATCH));
     process.stdout.write(`\r  ${Math.min(i + BATCH, kotobaRows.length)}/${kotobaRows.length} kotoba`);
   }
   console.log("");
 
-  // 5. Radical links
-  console.log("\n[5/5] Linking kanji ↔ radicals...");
-  await insertKanjiRadicals(kanjiRows);
+  // ── [5/5] Tatoeba sentences ──────────────────────────────────
+  console.log("\n[5/5] Seeding Tatoeba examples...");
+  const sentCount = await seedExamples();
+  console.log(`  ${sentCount} sentences`);
 
-  // Summary
-  const { count } = await supabase
+  // ── Summary ──────────────────────────────────────────────────
+  const { count: totalItems } = await supabase
     .from("curriculum_items")
+    .select("*", { count: "exact", head: true });
+  const { count: totalSents } = await supabase
+    .from("generated_sentences")
     .select("*", { count: "exact", head: true });
 
   console.log("\n═══════════════════════════════════════════════════");
-  console.log(` ✅ Done! ${count} total items in curriculum_items`);
-  console.log(`    ${kanjiInsert.length} kanji  |  ${kotobaRows.length} kotoba`);
-  console.log("    Next step: node src/scripts/enrich_items.js");
+  console.log(` Done!`);
+  console.log(`   ${totalItems} items  (${kanjiInsert.length} kanji + ${kotobaRows.length} kotoba)`);
+  console.log(`   ${totalSents} sentences in generated_sentences`);
+  console.log("   Next: node src/scripts/enrich_items.js");
   console.log("═══════════════════════════════════════════════════");
 }
 
