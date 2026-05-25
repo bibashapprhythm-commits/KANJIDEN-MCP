@@ -15,8 +15,8 @@ import { getConfig, getLearningContext }                                        
 import { createSourceText, updateSourceTextCounts, storeKanji, storeKotoba }   from "./modules/extractor.js";
 import { getDueToday }                                                          from "./modules/scheduler.js";
 import { processQuizAnswer }                                                    from "./modules/review.js";
-import { createSession, getPendingSession, getSession } from "./modules/session.js";
-import { getProgress, getWeakWords, getConfusionReport }                        from "./modules/analytics.js";
+import { createSession, getPendingSession, getSession, createCourse } from "./modules/session.js";
+import { getProgress, getWeakWords, getConfusionReport, getItems }    from "./modules/analytics.js";
 
 // ── Gateway key ───────────────────────────────────────────────────────────────
 const GATEWAY_KEY = process.env.GATEWAY_KEY;
@@ -50,15 +50,18 @@ async function completeSession({ session_id, marks_percent }) {
 
 // ── REST tool map (website uses these directly) ───────────────────────────────
 const REST_TOOLS = {
-  get_progress:        (_)    => getProgress(),
-  get_weak_words:      (args) => getWeakWords(args),
-  get_due_today:       (args) => getDueToday(args),
-  create_session:      (args) => createSession(args),
-  process_quiz_answer: (args) => processQuizAnswer(args),
-  get_learning_context:(_)    => getLearningContext(),
-  complete_session:    (args) => completeSession(args),
-  get_session:         (args) => getSession(args.session_id),
-get_pending_session: ()     => getPendingSession(),
+  get_config:           (_)    => getConfig(),
+  get_progress:         (args) => getProgress(args),
+  get_weak_words:       (args) => getWeakWords(args),
+  get_due_today:        (args) => getDueToday(args),
+  create_session:       (args) => createSession(args),
+  create_course:        (args) => createCourse(args),
+  process_quiz_answer:  (args) => processQuizAnswer(args),
+  get_learning_context: (_)    => getLearningContext(),
+  get_confusion_report: (_)    => getConfusionReport(),
+  complete_session:     (args) => completeSession(args),
+  get_session:          (args) => getSession(args.session_id),
+  get_pending_session:  ()     => getPendingSession(),
 };
 
 // ── MCP Server (for Claude.ai) ────────────────────────────────────────────────
@@ -89,24 +92,20 @@ server.tool("store_memo_learning",
     agent_model:   z.string().optional(),
     agent_version: z.string().optional(),
     kanji_items: z.array(z.object({
-      char:            z.string(),
-      onyomi:          z.array(z.string()).optional(),
-      kunyomi:         z.array(z.string()).optional(),
-      romaji_on:       z.array(z.string()).optional(),
-      romaji_kun:      z.array(z.string()).optional(),
-      meaning:         z.string(),
-      jlpt_level:      z.enum(["N1","N2","N3","N4","N5","unknown"]).optional(),
-      exam_important:  z.boolean().optional(),
-      daily_important: z.boolean().optional(),
+      char:       z.string(),
+      onyomi:     z.array(z.string()).optional(),
+      kunyomi:    z.array(z.string()).optional(),
+      romaji_on:  z.array(z.string()).optional(),
+      romaji_kun: z.array(z.string()).optional(),
+      meaning:    z.string(),
+      jlpt_level: z.enum(["N1","N2","N3","N4","N5","unknown"]).optional(),
     })).optional().default([]),
     kotoba_items: z.array(z.object({
-      word:            z.string(),
-      reading:         z.string(),
-      romaji:          z.string(),
-      meaning:         z.string(),
-      jlpt_level:      z.enum(["N1","N2","N3","N4","N5","unknown"]).optional(),
-      exam_important:  z.boolean().optional(),
-      daily_important: z.boolean().optional(),
+      word:       z.string(),
+      reading:    z.string(),
+      romaji:     z.string(),
+      meaning:    z.string(),
+      jlpt_level: z.enum(["N1","N2","N3","N4","N5","unknown"]).optional(),
     })).optional().default([]),
   },
   async ({ gateway_key, content, source_type, source_label, agent_model, agent_version, kanji_items, kotoba_items }) => {
@@ -159,6 +158,18 @@ server.tool("create_session",
   async ({ gateway_key, level, source, type, count }) => { validate(gateway_key); return ok(await createSession({ level, source, type, count })); }
 );
 
+// 5b. create_course
+server.tool("create_course",
+  "Create a structured course session for a JLPT level+type. Groups unmastered items by radical (kanji) or difficulty/level order, adds 2-3 mastered items for reinforcement, writes learning_paths rows, and returns a ready session_id.",
+  {
+    gateway_key: gk,
+    level:    z.enum(["N1","N2","N3","N4","N5"]),
+    type:     z.enum(["kanji","kotoba"]),
+    order_by: z.enum(["radical","difficulty","level"]).optional().default("radical"),
+  },
+  async ({ gateway_key, level, type, order_by }) => { validate(gateway_key); return ok(await createCourse({ level, type, order_by })); }
+);
+
 // 6. get_due_today
 server.tool("get_due_today",
   "All cards due for review today per SM-2 schedule.",
@@ -168,9 +179,13 @@ server.tool("get_due_today",
 
 // 7. get_progress
 server.tool("get_progress",
-  "Full progress: mastery breakdown, JLPT breakdown, due today, performance by question type.",
-  { gateway_key: gk },
-  async ({ gateway_key }) => { validate(gateway_key); return ok(await getProgress()); }
+  "Full progress: mastery breakdown, JLPT breakdown, due today. Optional level/type filters narrow to a specific JLPT level or item type.",
+  {
+    gateway_key: gk,
+    level: z.enum(["N1","N2","N3","N4","N5"]).optional(),
+    type:  z.enum(["kanji","kotoba","both"]).optional(),
+  },
+  async ({ gateway_key, level, type }) => { validate(gateway_key); return ok(await getProgress({ level, type })); }
 );
 
 // 8. get_weak_words
@@ -238,6 +253,35 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: err.message }));
       }
     });
+    return;
+  }
+
+  // GET /items → browse endpoint for website
+  if (req.method === "GET" && req.url?.startsWith("/items")) {
+    const url  = new URL(req.url, `http://localhost`);
+    const key  = url.searchParams.get("gateway_key");
+    if (key !== GATEWAY_KEY) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid gateway key" }));
+      return;
+    }
+    try {
+      const args = {
+        level:     url.searchParams.get("level")     || undefined,
+        type:      url.searchParams.get("type")      || undefined,
+        order_by:  url.searchParams.get("order_by")  || undefined,
+        page:      url.searchParams.get("page")      ? Number(url.searchParams.get("page"))      : 1,
+        page_size: url.searchParams.get("page_size") ? Number(url.searchParams.get("page_size")) : 50,
+      };
+      console.error(`[REST] GET /items`, args);
+      const result = await getItems(args);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      console.error(`[REST] GET /items error:`, err.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
     return;
   }
 

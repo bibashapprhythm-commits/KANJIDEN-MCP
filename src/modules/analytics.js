@@ -14,12 +14,23 @@ const PROGRESS_SELECT = `
 `;
 
 // ── Full progress report ──────────────────────────────────────────────────────
-export async function getProgress() {
-  const { data, error } = await supabase
+export async function getProgress({ level, type } = {}) {
+  let q = supabase
     .from("user_item_progress")
     .select(PROGRESS_SELECT)
     .eq("user_id", BIBS_USER_ID);
+
+  if (level)                   q = q.eq("curriculum_items.jlpt_level", level);
+  if (type && type !== "both") q = q.eq("curriculum_items.item_type",  type);
+
+  const { data, error } = await q;
   if (error) throw new Error(`getProgress failed: ${error.message}`);
+
+  // Count all curriculum_items matching the filter (includes unstarted items)
+  let cq = supabase.from("curriculum_items").select("id", { count: "exact", head: true });
+  if (level)                   cq = cq.eq("jlpt_level", level);
+  if (type && type !== "both") cq = cq.eq("item_type",  type);
+  const { count: curriculumTotal } = await cq;
 
   const today = TODAY();
   const all     = data ?? [];
@@ -80,9 +91,48 @@ export async function getProgress() {
     overall: {
       total,
       mastered,
-      due_today:       kanjiStats.due_today + kotobaStats.due_today,
-      mastery_percent: total > 0 ? Math.round((mastered / total) * 100) : 0,
+      due_today:        kanjiStats.due_today + kotobaStats.due_today,
+      mastery_percent:  total > 0 ? Math.round((mastered / total) * 100) : 0,
+      curriculum_total: curriculumTotal ?? 0,
     },
+  };
+}
+
+// ── Items browse (curriculum_items left-joined with progress) ─────────────────
+const ORDER_COLS = { priority: "priority", stroke_count: "stroke_count", frequency_rank: "frequency_rank" };
+
+export async function getItems({ level, type, order_by = "priority", page = 1, page_size = 50 } = {}) {
+  const offset   = (Number(page) - 1) * Number(page_size);
+  const orderCol = ORDER_COLS[order_by] ?? "priority";
+
+  let q = supabase
+    .from("curriculum_items")
+    .select("id, item_type, value, reading_hiragana, core_meaning, jlpt_level, stroke_count, frequency_rank, priority", { count: "exact" });
+
+  if (level)                   q = q.eq("jlpt_level", level);
+  if (type && type !== "both") q = q.eq("item_type",  type);
+
+  q = q.order(orderCol, { ascending: true, nullsFirst: false })
+       .range(offset, offset + Number(page_size) - 1);
+
+  const { data: items, count, error } = await q;
+  if (error) throw new Error(`getItems failed: ${error.message}`);
+  if (!items?.length) return { items: [], total: count ?? 0, page: Number(page), page_size: Number(page_size) };
+
+  const ids = items.map(i => i.id);
+  const { data: progress, error: progErr } = await supabase
+    .from("user_item_progress")
+    .select("curriculum_item_id, mastery_level")
+    .eq("user_id", BIBS_USER_ID)
+    .in("curriculum_item_id", ids);
+  if (progErr) throw new Error(`getItems progress: ${progErr.message}`);
+
+  const progMap = Object.fromEntries((progress ?? []).map(p => [p.curriculum_item_id, p.mastery_level]));
+  return {
+    items:     items.map(item => ({ ...item, mastery_level: progMap[item.id] ?? 0 })),
+    total:     count ?? 0,
+    page:      Number(page),
+    page_size: Number(page_size),
   };
 }
 

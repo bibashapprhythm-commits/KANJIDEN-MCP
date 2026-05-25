@@ -8,7 +8,8 @@
     "start":   "node src/index.js",
     "dev":     "node --watch src/index.js",
     "seed":    "node src/scripts/seed_canonical.js",
-    "enrich":  "node src/scripts/enrich_items.js"
+    "enrich":  "node src/scripts/enrich_items.js",
+    "tag-jlpt": "node src/scripts/tag_kotoba_jlpt.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk":         "^0.55.0",

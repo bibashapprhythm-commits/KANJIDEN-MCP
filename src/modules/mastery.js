@@ -77,7 +77,6 @@ export function computeMastery({
 //       Monitor and adjust if needed.
 export function computeWeakScore({
   times_wrong,
-  seen_in_texts,
   streak,
   mastery_level,
   last_correct_date,
@@ -98,9 +97,8 @@ export function computeWeakScore({
     : 0;
 
   return Math.round((
-      (times_wrong      ?? 0) * 2.0
-    + (seen_in_texts    ?? 0) * 1.5
-    - (streak           ?? 0) * 3.0
+      (times_wrong   ?? 0) * 2.0
+    - (streak        ?? 0) * 3.0
     - (mastery_level    ?? 0) * 5.0
     + daysSinceCorrect        * 0.5
     + hesitationPenalty

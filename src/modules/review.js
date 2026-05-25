@@ -70,7 +70,6 @@ export async function processQuizAnswer({
   // 4. Weak score (seen_in_texts removed from schema — pass 0)
   const newWeakScore = computeWeakScore({
     times_wrong:       newTimesWrong,
-    seen_in_texts:     0,
     streak:            newStreak,
     mastery_level:     newMastery,
     last_correct_date: correct ? today : current.last_correct_date,
