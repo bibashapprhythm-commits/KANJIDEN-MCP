@@ -17,6 +17,7 @@ import { getDueToday }                                                          
 import { processQuizAnswer }                                                    from "./modules/review.js";
 import { createSession, getPendingSession, getSession, createCourse, createContentCourse } from "./modules/session.js";
 import { getProgress, getWeakWords, getConfusionReport, getItems, getNewItems, getItemsByTag, getRelatedWords } from "./modules/analytics.js";
+import { checkBulk, writeBulk } from "./modules/enrichment.js";
 
 // ── Gateway key ───────────────────────────────────────────────────────────────
 const GATEWAY_KEY = process.env.GATEWAY_KEY;
@@ -66,6 +67,12 @@ const REST_TOOLS = {
   get_new_items:        (args) => getNewItems(args),
   get_items_by_tag:     (args) => getItemsByTag(args),
   get_related_words:    (args) => getRelatedWords(args),
+  enrich_item: async (args) => {
+    const { mode, items } = args
+    if (mode === 'check_bulk') return checkBulk({ items })
+    if (mode === 'write_bulk') return writeBulk({ items })
+    throw new Error(`enrich_item: unknown mode "${mode}"`)
+  },
   get_source_text: async ({ id }) => {
     if (!id) throw new Error("id required");
     const { data, error } = await supabase
@@ -252,6 +259,22 @@ server.tool("get_confusion_report",
   "Analyzes review_log confusion patterns.",
   { gateway_key: gk },
   async ({ gateway_key }) => { validate(gateway_key); return ok(await getConfusionReport()); }
+);
+
+// 10. enrich_item
+server.tool("enrich_item",
+  "Check enrichment status or write enrichment data for kanji items in bulk. Mode check_bulk returns current enrichment status. Mode write_bulk writes validated enrichment data.",
+  {
+    gateway_key: gk,
+    mode: z.enum(["check_bulk","write_bulk"]).describe("check_bulk to inspect current state, write_bulk to save enrichment data"),
+    items: z.array(z.object({}).passthrough()).describe("For check_bulk: [{value, jlpt_level}]. For write_bulk: [{id, value, jlpt_level, data}]"),
+  },
+  async ({ gateway_key, mode, items }) => {
+    validate(gateway_key)
+    if (mode === 'check_bulk') return ok(await checkBulk({ items }))
+    if (mode === 'write_bulk') return ok(await writeBulk({ items }))
+    throw new Error(`enrich_item: unknown mode "${mode}"`)
+  }
 );
 
 // ── HTTP Server ───────────────────────────────────────────────────────────────
