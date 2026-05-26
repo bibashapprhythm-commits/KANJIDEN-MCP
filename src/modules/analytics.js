@@ -122,14 +122,24 @@ export async function getItems({ level, type, order_by = "priority", page = 1, p
   const ids = items.map(i => i.id);
   const { data: progress, error: progErr } = await supabase
     .from("user_item_progress")
-    .select("curriculum_item_id, mastery_level")
+    .select("curriculum_item_id, mastery_level, next_review, review_count, times_correct, times_wrong")
     .eq("user_id", BIBS_USER_ID)
     .in("curriculum_item_id", ids);
   if (progErr) throw new Error(`getItems progress: ${progErr.message}`);
 
-  const progMap = Object.fromEntries((progress ?? []).map(p => [p.curriculum_item_id, p.mastery_level]));
+  const progMap = Object.fromEntries((progress ?? []).map(p => [p.curriculum_item_id, p]));
   return {
-    items:     items.map(item => ({ ...item, mastery_level: progMap[item.id] ?? 0 })),
+    items:     items.map(item => {
+      const p = progMap[item.id] ?? {};
+      return {
+        ...item,
+        mastery_level: p.mastery_level ?? 0,
+        next_review:   p.next_review ?? null,
+        review_count:  p.review_count ?? 0,
+        times_correct: p.times_correct ?? 0,
+        times_wrong:   p.times_wrong ?? 0,
+      };
+    }),
     total:     count ?? 0,
     page:      Number(page),
     page_size: Number(page_size),
@@ -182,6 +192,48 @@ export async function getWeakWords({ type = "both" } = {}) {
 
   items.sort((a, b) => b.weak_score - a.weak_score);
   return { total_weak: items.length, items };
+}
+
+// ── New items (review_count = 0) ──────────────────────────────────────────────
+export async function getNewItems({ type = "both", level } = {}) {
+  const FIELDS = `
+    id, curriculum_item_id, mastery_level, review_count, weak_score,
+    curriculum_items!inner(item_type, value, reading_hiragana, romaji, core_meaning, jlpt_level)
+  `;
+
+  const fetchType = async (itemType) => {
+    let q = supabase
+      .from("user_item_progress")
+      .select(FIELDS)
+      .eq("user_id", BIBS_USER_ID)
+      .eq("curriculum_items.item_type", itemType)
+      .eq("review_count", 0);
+
+    if (level) q = q.eq("curriculum_items.jlpt_level", level);
+
+    const { data, error } = await q.order("created_at", { ascending: false }).limit(100);
+    if (error) throw new Error(`getNewItems ${itemType}: ${error.message}`);
+
+    return (data ?? []).map(p => ({
+      id:            p.curriculum_item_id,
+      progress_id:   p.id,
+      item_type:     itemType,
+      item:          p.curriculum_items.value,
+      value:         p.curriculum_items.value,
+      reading:       p.curriculum_items.reading_hiragana,
+      romaji:        p.curriculum_items.romaji,
+      meaning:       p.curriculum_items.core_meaning,
+      jlpt_level:    p.curriculum_items.jlpt_level,
+      mastery_level: p.mastery_level,
+      review_count:  p.review_count,
+    }));
+  };
+
+  const items = [];
+  if (type === "kanji"  || type === "both") items.push(...(await fetchType("kanji")));
+  if (type === "kotoba" || type === "both") items.push(...(await fetchType("kotoba")));
+
+  return { total_new: items.length, items };
 }
 
 // ── Confusion report ──────────────────────────────────────────────────────────
