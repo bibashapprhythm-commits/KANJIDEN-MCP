@@ -164,14 +164,26 @@ export async function createSession({ level, source, type, count, item_ids }) {
 export async function getPendingSession() {
   const { data, error } = await supabase
     .from("sessions")
-    .select("id, date, params, items")
+    .select("id, params, items, created_at, source_text_id, course_title, course_description, course_phase, course_total_phases")
     .eq("user_id", BIBS_USER_ID)
     .eq("status", "pending")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
-  if (error) return null;
-  return data;
+    .order("created_at", { ascending: false });
+
+  if (error) return { pending_course_sessions: [], pending_regular_session: null };
+
+  const all = data ?? [];
+  const pending_course_sessions = all
+    .filter(s => s.params?.is_course === true || s.source_text_id != null)
+    .map(({ id, params, items, created_at, source_text_id, course_title, course_description, course_phase, course_total_phases }) => ({
+      id, params, created_at,
+      items: items ?? [],
+      items_count: (items ?? []).length,
+      source_text_id, course_title, course_description,
+      course_phase, course_total_phases,
+    }));
+  const pending_regular_session = all.find(s => s.params?.is_course !== true && s.source_text_id == null) ?? null;
+
+  return { pending_course_sessions, pending_regular_session };
 }
 
 export async function getSession(sessionId) {
@@ -182,6 +194,82 @@ export async function getSession(sessionId) {
     .single();
   if (error) throw new Error(`getSession failed: ${error.message}`);
   return data;
+}
+
+// ── Create a content course from a saved source_text ─────────────────────────
+// One session per JLPT phase (N5 first, then N4, then N3+). Each session links
+// back to the source_text_id so the frontend can group and label them.
+export async function createContentCourse({ sourceTextId, courseTitle, courseDescription, goalContent, phases }) {
+  if (!sourceTextId) throw new Error("sourceTextId required");
+  if (!courseTitle)  throw new Error("courseTitle required");
+  if (!phases?.length) throw new Error("phases array required and must not be empty");
+
+  const validPhases = phases.filter(p => p.item_ids?.length > 0);
+  if (!validPhases.length) throw new Error("All phases have empty item_ids — nothing to create");
+
+  const today = TODAY();
+
+  // 1. Set goal_content on the source_texts row (only if not already set)
+  if (goalContent) {
+    const { error: stErr } = await supabase
+      .from("source_texts")
+      .update({ goal_content: goalContent })
+      .eq("id", sourceTextId)
+      .is("goal_content", null);
+    if (stErr) throw new Error(`createContentCourse source_text update: ${stErr.message}`);
+  }
+
+  // 2. For each phase, fetch items then insert one session
+  const createdSessions = [];
+
+  for (const phase of validPhases) {
+    const itemIds = phase.item_ids;
+
+    const { data: ciItems, error: ciErr } = await supabase
+      .from("curriculum_items").select(CI_SELECT).in("id", itemIds);
+    if (ciErr) throw new Error(`createContentCourse items fetch phase ${phase.phase}: ${ciErr.message}`);
+
+    const { data: progressRows } = await supabase
+      .from("user_item_progress").select(PROG_FIELDS)
+      .eq("user_id", BIBS_USER_ID).in("curriculum_item_id", itemIds);
+    const progMap = Object.fromEntries((progressRows ?? []).map(p => [p.curriculum_item_id, p]));
+
+    const sessionItems = (ciItems ?? []).map(ci => buildDirectItem(ci, progMap[ci.id]));
+
+    const { data: session, error: sessionError } = await supabase
+      .from("sessions")
+      .insert({
+        user_id:            BIBS_USER_ID,
+        date:               today,
+        source_text_id:     sourceTextId,
+        course_title:       courseTitle,
+        course_description: courseDescription ?? null,
+        course_phase:       phase.phase,
+        course_total_phases: validPhases.length,
+        params: {
+          source:      "content_course",
+          phase_label: phase.label,
+        },
+        items:  sessionItems,
+        status: "pending",
+      })
+      .select("id").single();
+    if (sessionError) throw new Error(`createContentCourse session insert phase ${phase.phase}: ${sessionError.message}`);
+
+    createdSessions.push({
+      session_id: session.id,
+      phase:      phase.phase,
+      label:      phase.label,
+      item_count: sessionItems.length,
+    });
+  }
+
+  return {
+    success:        true,
+    source_text_id: sourceTextId,
+    course_title:   courseTitle,
+    sessions:       createdSessions,
+  };
 }
 
 // ── Create a structured course session ───────────────────────────────────────

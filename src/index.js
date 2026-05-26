@@ -15,8 +15,8 @@ import { getConfig, getLearningContext }                                        
 import { createSourceText, updateSourceTextCounts, storeKanji, storeKotoba }   from "./modules/extractor.js";
 import { getDueToday }                                                          from "./modules/scheduler.js";
 import { processQuizAnswer }                                                    from "./modules/review.js";
-import { createSession, getPendingSession, getSession, createCourse } from "./modules/session.js";
-import { getProgress, getWeakWords, getConfusionReport, getItems }    from "./modules/analytics.js";
+import { createSession, getPendingSession, getSession, createCourse, createContentCourse } from "./modules/session.js";
+import { getProgress, getWeakWords, getConfusionReport, getItems, getNewItems } from "./modules/analytics.js";
 
 // ── Gateway key ───────────────────────────────────────────────────────────────
 const GATEWAY_KEY = process.env.GATEWAY_KEY;
@@ -61,7 +61,9 @@ const REST_TOOLS = {
   get_confusion_report: (_)    => getConfusionReport(),
   complete_session:     (args) => completeSession(args),
   get_session:          (args) => getSession(args.session_id),
-  get_pending_session:  ()     => getPendingSession(),
+  get_pending_session:      ()     => getPendingSession(),
+  create_content_course:    (args) => createContentCourse(args),
+  get_new_items:        (args) => getNewItems(args),
 };
 
 // ── MCP Server (for Claude.ai) ────────────────────────────────────────────────
@@ -170,6 +172,33 @@ server.tool("create_course",
   async ({ gateway_key, level, type, order_by }) => { validate(gateway_key); return ok(await createCourse({ level, type, order_by })); }
 );
 
+// 5c. create_content_course
+server.tool("create_content_course",
+  "Creates a named, phased content course from a saved source text. Each phase becomes one session ordered by JLPT level (easiest first). Returns session IDs for all phases.",
+  {
+    gateway_key:     gk,
+    source_text_id:  z.string().uuid().describe("UUID of the source_texts row"),
+    course_title:    z.string().describe("Human-readable title with romaji and timestamp"),
+    course_description: z.string().optional(),
+    goal_content:    z.string().optional().describe("Original Japanese text for final re-read"),
+    phases: z.array(z.object({
+      phase:    z.number(),
+      label:    z.string(),
+      item_ids: z.array(z.string().uuid()),
+    })).describe("Phases ordered easiest-first (N5=1, N4=2, N3+=3)"),
+  },
+  async ({ gateway_key, source_text_id, course_title, course_description, goal_content, phases }) => {
+    validate(gateway_key);
+    return ok(await createContentCourse({
+      sourceTextId:       source_text_id,
+      courseTitle:        course_title,
+      courseDescription:  course_description,
+      goalContent:        goal_content,
+      phases,
+    }));
+  }
+);
+
 // 6. get_due_today
 server.tool("get_due_today",
   "All cards due for review today per SM-2 schedule.",
@@ -193,6 +222,17 @@ server.tool("get_weak_words",
   "Items with mastery < 3 sorted by weak_score DESC.",
   { gateway_key: gk, type: z.enum(["kanji","kotoba","both"]).optional().default("both") },
   async ({ gateway_key, type }) => { validate(gateway_key); return ok(await getWeakWords({ type })); }
+);
+
+// 9b. get_new_items
+server.tool("get_new_items",
+  "Items with review_count=0 (never reviewed). Optional level and type filters.",
+  {
+    gateway_key: gk,
+    type:  z.enum(["kanji","kotoba","both"]).optional().default("both"),
+    level: z.enum(["N1","N2","N3","N4","N5"]).optional(),
+  },
+  async ({ gateway_key, type, level }) => { validate(gateway_key); return ok(await getNewItems({ type, level })); }
 );
 
 // 9. get_confusion_report
