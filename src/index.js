@@ -16,7 +16,7 @@ import { createSourceText, updateSourceTextCounts, storeKanji, storeKotoba }   f
 import { getDueToday }                                                          from "./modules/scheduler.js";
 import { processQuizAnswer }                                                    from "./modules/review.js";
 import { createSession, getPendingSession, getSession, createCourse, createContentCourse } from "./modules/session.js";
-import { getProgress, getWeakWords, getConfusionReport, getItems, getNewItems } from "./modules/analytics.js";
+import { getProgress, getWeakWords, getConfusionReport, getItems, getNewItems, getItemsByTag, getRelatedWords } from "./modules/analytics.js";
 
 // ── Gateway key ───────────────────────────────────────────────────────────────
 const GATEWAY_KEY = process.env.GATEWAY_KEY;
@@ -64,6 +64,18 @@ const REST_TOOLS = {
   get_pending_session:      ()     => getPendingSession(),
   create_content_course:    (args) => createContentCourse(args),
   get_new_items:        (args) => getNewItems(args),
+  get_items_by_tag:     (args) => getItemsByTag(args),
+  get_related_words:    (args) => getRelatedWords(args),
+  get_source_text: async ({ id }) => {
+    if (!id) throw new Error("id required");
+    const { data, error } = await supabase
+      .from("source_texts")
+      .select("id, goal_content, content, created_at")
+      .eq("id", id)
+      .single();
+    if (error) throw new Error(`get_source_text failed: ${error.message}`);
+    return data ?? null;
+  },
 };
 
 // ── MCP Server (for Claude.ai) ────────────────────────────────────────────────

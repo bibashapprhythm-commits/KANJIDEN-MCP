@@ -236,6 +236,61 @@ export async function getNewItems({ type = "both", level } = {}) {
   return { total_new: items.length, items };
 }
 
+// ── Items by tag (cluster browser) ───────────────────────────────────────────
+export async function getItemsByTag({ tag, jlpt_level = "N5" } = {}) {
+  if (!tag) throw new Error("tag required");
+
+  const { data: items, error } = await supabase
+    .from("curriculum_items")
+    .select("id, value, item_type, jlpt_level, core_meaning, onyomi, kunyomi, romaji_on, romaji_kun, mnemonic, meaning_extended, tags, priority")
+    .eq("jlpt_level", jlpt_level)
+    .eq("item_type", "kanji")
+    .contains("tags", [tag])
+    .order("priority", { ascending: false });
+
+  if (error) throw new Error(`getItemsByTag failed: ${error.message}`);
+  if (!items?.length) return { items: [] };
+
+  const ids = items.map(i => i.id);
+  const { data: progress, error: progErr } = await supabase
+    .from("user_item_progress")
+    .select("curriculum_item_id, mastery_level, next_review, review_count")
+    .eq("user_id", BIBS_USER_ID)
+    .in("curriculum_item_id", ids);
+  if (progErr) throw new Error(`getItemsByTag progress: ${progErr.message}`);
+
+  const progMap = Object.fromEntries((progress ?? []).map(p => [p.curriculum_item_id, p]));
+  return {
+    items: items.map(item => {
+      const p = progMap[item.id] ?? null;
+      return {
+        ...item,
+        mastery_level: p?.mastery_level ?? 0,
+        next_review:   p?.next_review   ?? null,
+        review_count:  p?.review_count  ?? 0,
+        in_progress:   p !== null,
+      };
+    }),
+  };
+}
+
+// ── Related vocab words containing a kanji character ─────────────────────────
+export async function getRelatedWords({ char } = {}) {
+  if (!char) throw new Error("char required");
+
+  const { data, error } = await supabase
+    .from("curriculum_items")
+    .select("id, value, reading_hiragana, romaji, core_meaning, jlpt_level, priority")
+    .eq("item_type", "kotoba")
+    .in("jlpt_level", ["N5", "N4", "N3"])
+    .like("value", `%${char}%`)
+    .order("priority", { ascending: false })
+    .limit(5);
+
+  if (error) throw new Error(`getRelatedWords failed: ${error.message}`);
+  return { items: data ?? [] };
+}
+
 // ── Confusion report ──────────────────────────────────────────────────────────
 // Derived from review_log — no confusion_patterns view in v3 schema
 export async function getConfusionReport() {
