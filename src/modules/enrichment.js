@@ -19,50 +19,40 @@ function hasReadingDuplicates(row) {
   return new Set(on).size !== on.length || new Set(kun).size !== kun.length
 }
 
-function getStatus(row) {
-  if (!row) return 'not_found'
-
-  const hasCompounds = row.compounds?.length > 0
-  const hasSentences = row.example_sentences?.length > 0
-  const hasMnemonic  = !!row.mnemonic
-  const hasNotes     = !!row.teaching_notes
-  const hasMeaning   = !!row.meaning_extended
-  const hasTags      = row.suggested_tags?.length > 0
-  const readingsDirty = hasReadingDuplicates(row)
-
-  const allDone = hasCompounds && hasSentences && hasMnemonic
-               && hasNotes && hasMeaning && hasTags && !readingsDirty
-
-  if (allDone) return 'complete'
-
-  const anyDone = hasCompounds || hasSentences || hasMnemonic
-               || hasNotes || hasMeaning || hasTags
-
-  return anyDone ? 'partial' : 'empty'
+const QUALITY_THRESHOLDS = {
+  meaning_extended:  (v) => typeof v === 'string' && v.length > 40,
+  mnemonic:          (v) => typeof v === 'string' && v.length > 40,
+  teaching_notes:    (v) => typeof v === 'string' && v.length > 60,
+  compounds:         (v) => Array.isArray(v) && v.length >= 3,
+  example_sentences: (v) => Array.isArray(v) && v.length >= 1,
+  suggested_tags:    (v) => Array.isArray(v) && v.length >= 1,
 }
 
 function getNeeds(row) {
   const needs = []
-  if (hasReadingDuplicates(row))      needs.push('readings_clean')
-  if (!row.meaning_extended)          needs.push('meaning_extended')
-  if (!row.mnemonic)                  needs.push('mnemonic')
-  if (!row.teaching_notes)            needs.push('teaching_notes')
-  if (!row.compounds?.length)         needs.push('compounds')
-  if (!row.example_sentences?.length) needs.push('example_sentences')
-  if (!row.suggested_tags?.length)    needs.push('suggested_tags')
+
+  if (hasReadingDuplicates(row)) needs.push('readings_clean')
+
+  for (const [field, isQuality] of Object.entries(QUALITY_THRESHOLDS)) {
+    if (!isQuality(row[field])) needs.push(field)
+  }
+
   return needs
 }
 
-function getHas(row) {
-  const has = []
-  if (!hasReadingDuplicates(row) && (row.romaji_on?.length || row.romaji_kun?.length)) has.push('readings_clean')
-  if (row.meaning_extended)          has.push('meaning_extended')
-  if (row.mnemonic)                  has.push('mnemonic')
-  if (row.teaching_notes)            has.push('teaching_notes')
-  if (row.compounds?.length)         has.push('compounds')
-  if (row.example_sentences?.length) has.push('example_sentences')
-  if (row.suggested_tags?.length)    has.push('suggested_tags')
-  return has
+function getStatus(row, needs) {
+  if (!row) return 'not_found'
+  if (needs.length === 0) return 'complete'
+
+  const hasAnything =
+    row.compounds?.length > 0 ||
+    row.example_sentences?.length > 0 ||
+    !!row.mnemonic ||
+    !!row.teaching_notes ||
+    !!row.meaning_extended ||
+    row.suggested_tags?.length > 0
+
+  return hasAnything ? 'partial' : 'empty'
 }
 
 export async function checkBulk({ items } = {}) {
@@ -100,19 +90,21 @@ export async function checkBulk({ items } = {}) {
   const results = items.map(req => {
     const key = `${req.value}|${req.jlpt_level}`
     const row = rowMap[key] ?? null
-    const status = getStatus(row)
 
-    if (status === 'not_found') {
+    if (!row) {
       return { value: req.value, jlpt_level: req.jlpt_level, status: 'not_found', has: [], needs: [] }
     }
+
+    const needs  = getNeeds(row)
+    const status = getStatus(row, needs)
 
     return {
       id:         row.id,
       value:      row.value,
       jlpt_level: row.jlpt_level,
       status,
-      has:   getHas(row),
-      needs: getNeeds(row),
+      has: Object.keys(QUALITY_THRESHOLDS).filter(field => QUALITY_THRESHOLDS[field](row[field])),
+      needs,
       current_readings: {
         onyomi:     row.onyomi    ?? [],
         kunyomi:    row.kunyomi   ?? [],
